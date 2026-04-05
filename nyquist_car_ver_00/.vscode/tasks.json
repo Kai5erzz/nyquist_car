@@ -1,0 +1,22 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Download via USB (DFU)",
+            "type": "shell",
+            "command": "dfu-util",
+            "args": [
+                "-a", "0",
+                "-d", "0483:df11",
+                "-s", "0x08000000:leave",
+                "-D", "${workspaceFolder}/build/${workspaceFolderBasename}.bin" 
+            ],
+            "dependsOn": "Build Project",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": []
+        }
+    ]
+}

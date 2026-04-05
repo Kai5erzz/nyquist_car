@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmake --build build)",
+      "Bash(dir /b \"d:\\\\User\\\\Project\\\\h743iit6\\\\car_chassis\\\\User\\\\drv\")"
+    ],
+    "additionalDirectories": [
+      "d:\\User\\Project\\h743iit6\\car_chassis\\User\\drv"
+    ]
+  }
+}
