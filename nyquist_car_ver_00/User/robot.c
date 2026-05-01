@@ -7,10 +7,8 @@
 #include "robot.h"
 #include "rm_task.h"
 #include "uMCN.h"
-#include "drv/oled/OLED.h"
 
 /* ==================== Topic Definitions ==================== */
-/* 同一个主题名称不可被重复定义 */
 MCN_DEFINE(chassis_cmd, sizeof(struct chassis_cmd_msg));
 MCN_DEFINE(chassis_fdb, sizeof(struct chassis_fdb_msg));
 MCN_DEFINE(ins_topic, sizeof(struct ins_msg));
@@ -22,17 +20,15 @@ MCN_DEFINE(sense_fdb, sizeof(struct sense_fdb_msg));
 static void mcn_topic_init(void);
 
 void OS_task_init() {
-    
+
 }
 
 void robot_init(void)
 {
-    // 关闭中断,防止在初始化过程中发生中断
     __disable_irq();
 
-    OS_task_init();          // 创建基础任务
-
-    mcn_topic_init();        // 话题注册初始化
+    OS_task_init();
+    mcn_topic_init();
 
     sense_task_init();
     ins_task_init();
@@ -40,15 +36,9 @@ void robot_init(void)
     // chassis_task_init();
     // cmd_task_init();
 
-
-
-    // 初始化完成,开启中断
     __enable_irq();
 }
 
-/**
- * @brief ipc uMCN 各话题注册
- */
 static void mcn_topic_init(void)
 {
     mcn_advertise(MCN_HUB(ins_topic), NULL);

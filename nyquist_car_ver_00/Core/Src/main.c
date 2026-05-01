@@ -19,14 +19,18 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "cmsis_os.h"
+#include "adc.h"
 #include "fdcan.h"
-#include "i2c.h"
+#include "lptim.h"
+#include "stm32h7xx_hal_uart.h"
+#include "tim.h"
+#include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "drv/oled/OLED.h"
 #include "robot.h"
+#include "drv/drv8870/motor_ctrl.h"
 #include "stm32h7xx_hal.h"
 #include "stm32h7xx_hal_gpio.h"
 /* USER CODE END Includes */
@@ -98,7 +102,15 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_FDCAN1_Init();
-  MX_I2C1_Init();
+  MX_LPTIM1_Init();
+  MX_LPTIM2_Init();
+  MX_TIM2_Init();
+  MX_TIM3_Init();
+  MX_TIM4_Init();
+  MX_TIM5_Init();
+  MX_USART1_UART_Init();
+  MX_TIM6_Init();
+  MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
   // FDCAN滤波器配置: 接收IMU模块(0x11)的数据
   FDCAN_FilterTypeDef sFilterConfig;
@@ -110,15 +122,15 @@ int main(void)
   sFilterConfig.FilterID2 = 0x000; // 掩码: 精确匹配
   HAL_FDCAN_ConfigFilter(&hfdcan1, &sFilterConfig);
 
-  // 启动FDCAN1并使能RX FIFO0新消息中断
-  OLED_Init();
+  /* 启动FDCAN1并使能RX FIFO0新消息中断 */
   HAL_FDCAN_Start(&hfdcan1);
   HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0);
-  OLED_ShowString(1, 1, "hello czr");
-  OLED_UpdateGRAM();
+  HAL_UART_Transmit(&huart1, (uint8_t *)"hello", sizeof("hello"), 100);
+  /* 初始化电机控制 (TIM6中断驱动) */
+  Motor_Ctrl_Init();
+
+  /* 初始化机器人系统 */
   robot_init();
-  OLED_ShowString(1, 1, "enabled");
-  OLED_UpdateGRAM();
 
   /* USER CODE END 2 */
 
@@ -242,6 +254,9 @@ void MPU_Config(void)
   * @param  htim : TIM handle
   * @retval None
   */
+/* TIM6中断计数器 (在sense_task.c中定义) */
+extern volatile uint32_t tim6_irq_count;
+
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   /* USER CODE BEGIN Callback 0 */
@@ -250,6 +265,12 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   if (htim->Instance == TIM17)
   {
     HAL_IncTick();
+  }
+  /* TIM6中断: 电机控制循环 500Hz */
+  if (htim->Instance == TIM6)
+  {
+    tim6_irq_count++;
+    Motor_Ctrl_Loop();
   }
   /* USER CODE BEGIN Callback 1 */
 

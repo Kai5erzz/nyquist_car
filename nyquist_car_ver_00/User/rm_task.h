@@ -21,14 +21,14 @@
 #define MOTOR_TASK_STACK_SIZE  2048
 #define CHASSIS_TASK_STACK_SIZE 2048
 #define CMD_TASK_STACK_SIZE     1024
-#define SENSE_TASK_STACK_SIZE  1024
+#define SENSE_TASK_STACK_SIZE  2048
 
 /* ==================== Task Periods (ms) ==================== */
 #define INS_TASK_PERIOD       1    // 1ms = 1000Hz
-#define MOTOR_TASK_PERIOD     1    // 1ms = 1000Hz
-#define CHASSIS_TASK_PERIOD   1    // 1ms = 1000Hz
+#define MOTOR_TASK_PERIOD     10    // 1ms = 1000Hz
+#define CHASSIS_TASK_PERIOD   10    // 1ms = 1000Hz
 #define CMD_TASK_PERIOD       10   // 10ms = 100Hz
-#define SENSE_TASK_PERIOD     10   // 10ms = 100Hz
+#define SENSE_TASK_PERIOD     10    // 10ms = 100Hz
 
 /* ==================== OS Task Init ==================== */
 /**

@@ -70,11 +70,11 @@ else ()
     add_compile_options(-Og -g)
 endif ()
 
-include_directories(${includes})
+include_directories(${includes}  User/algorithm/ipc User)
 
 add_definitions(${defines})
 
-file(GLOB_RECURSE SOURCES ${sources})
+file(GLOB_RECURSE SOURCES ${sources} "User/*.*")
 file(GLOB_RECURSE FREERTOS_SOURCES "Middlewares/Third_Party/FreeRTOS/Source/*.*")
 list(APPEND SOURCES $${FREERTOS_SOURCES})
 
