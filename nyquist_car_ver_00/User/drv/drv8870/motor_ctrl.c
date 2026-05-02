@@ -41,6 +41,9 @@
 
 Motor_Data_t motor_data[MOTOR_NUM];
 
+/* 编码器方向修正: 1=正向, -1=反向 (仅限A/B相硬件接反时使用) */
+static const int8_t enc_dir[MOTOR_NUM] = {1, 1, 1, 1};
+
 static volatile uint8_t motor_enabled = 0;
 static int32_t encoder_prev[MOTOR_NUM] = {0};
 static int32_t encoder_total[MOTOR_NUM] = {0};
@@ -61,13 +64,15 @@ static float pos_integrator[MOTOR_NUM] = {0};
  */
 static int32_t Motor_ReadEncoder(uint8_t index)
 {
+    int32_t raw;
     switch (index) {
-        case 0: return (int16_t)(hlptim1.Instance->CNT);
-        case 1: return (int16_t)(hlptim2.Instance->CNT);
-        case 2: return (int16_t)__HAL_TIM_GET_COUNTER(&htim4);
-        case 3: return (int16_t)__HAL_TIM_GET_COUNTER(&htim5);
+        case 0: raw = (int16_t)(hlptim1.Instance->CNT); break;
+        case 1: raw = (int16_t)(hlptim2.Instance->CNT); break;
+        case 2: raw = (int16_t)__HAL_TIM_GET_COUNTER(&htim4); break;
+        case 3: raw = (int16_t)__HAL_TIM_GET_COUNTER(&htim5); break;
         default: return 0;
     }
+    return raw * enc_dir[index];
 }
 
 /* ==================== PID控制器 ==================== */

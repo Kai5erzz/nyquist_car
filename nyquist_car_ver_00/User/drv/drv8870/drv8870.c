@@ -37,17 +37,17 @@ void DRV8870_Init(void)
     drv8870.motor[1].max_duty   = htim3.Init.Period;
     drv8870.motor[1].duty       = 0;
 
-    /* MOTOR3: TIM2 CH1 + CH2 */
+    /* MOTOR3: TIM2 CH2 + CH1 (IN1/IN2反接) */
     drv8870.motor[2].htim       = &htim2;
-    drv8870.motor[2].channel_in1 = TIM_CHANNEL_1;
-    drv8870.motor[2].channel_in2 = TIM_CHANNEL_2;
+    drv8870.motor[2].channel_in1 = TIM_CHANNEL_2;
+    drv8870.motor[2].channel_in2 = TIM_CHANNEL_1;
     drv8870.motor[2].max_duty   = htim2.Init.Period;
     drv8870.motor[2].duty       = 0;
 
-    /* MOTOR4: TIM2 CH3 + CH4 */
+    /* MOTOR4: TIM2 CH4 + CH3 (IN1/IN2反接) */
     drv8870.motor[3].htim       = &htim2;
-    drv8870.motor[3].channel_in1 = TIM_CHANNEL_3;
-    drv8870.motor[3].channel_in2 = TIM_CHANNEL_4;
+    drv8870.motor[3].channel_in1 = TIM_CHANNEL_4;
+    drv8870.motor[3].channel_in2 = TIM_CHANNEL_3;
     drv8870.motor[3].max_duty   = htim2.Init.Period;
     drv8870.motor[3].duty       = 0;
 }

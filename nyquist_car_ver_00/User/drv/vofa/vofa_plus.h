@@ -18,7 +18,7 @@
 #include <stdint.h>
 #include "usart.h"
 
-#define VOFA_MAX_CHANNELS 10
+#define VOFA_MAX_CHANNELS 16
 
 /**
  * @brief 数据包结构体

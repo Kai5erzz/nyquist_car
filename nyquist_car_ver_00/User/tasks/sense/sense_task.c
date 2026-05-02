@@ -1,20 +1,15 @@
 /**
  * @file    sense_task.c
  * @author  kaiser
- * @version V1.3.0
+ * @version V1.4.0
  * @date    2026-05-01
- * @brief   MOTOR2 电流/力矩闭环调试任务
+ * @brief   四电机速度闭环调试任务
  *
  * VOFA+ 8通道:
- *   CH0: 目标力矩 (N·m)
- *   CH1: 实际力矩 (N·m)
- *   CH2: 实际电流 (A)
- *   CH3: PWM输出值
- *   CH4: 力矩误差 (N·m)
- *   CH5: ADC原始值
- *   CH6: ADC零偏值
- *   CH7: TIM6中断计数
+ *   CH0~3: 4个电机实际速度 (rad/s)
+ *   CH4~7: 4个电机PWM输出
  *
+ * Watch窗口: debug_data 查看全部数据
  * 周期: 10ms (100Hz)
  */
 
@@ -23,24 +18,27 @@
 #include "rm_task.h"
 #include "robot.h"
 #include "drv/drv8870/motor_ctrl.h"
-#include "drv/drv8870/current_sense.h"
 #include "drv/vofa/vofa_plus.h"
 #include "usart.h"
 #include "tim.h"
+#include "lptim.h"
 
-/* ==================== MOTOR2 目标力矩 (可手动修改) ==================== */
-#define MOTOR2_TARGET_TORQUE  0.01f  /* N·m */
+/* ==================== 四电机目标速度 (可手动修改) ==================== */
+#define MOTOR1_TARGET_SPEED  20.0f   /* rad/s */
+#define MOTOR2_TARGET_SPEED  -20.0f   /* rad/s */
+#define MOTOR3_TARGET_SPEED  20.0f   /* rad/s */
+#define MOTOR4_TARGET_SPEED  20.0f   /* rad/s */
 
 /* ==================== 全局调试数据 ==================== */
 struct {
-    float target_torque;       /**< 目标力矩 (N·m) */
-    float actual_torque;       /**< 实际力矩 (N·m) */
-    float actual_current;      /**< 实际电流 (A) */
-    int16_t pwm_out;           /**< PWM输出值 */
-    float torque_error;        /**< 力矩误差 (N·m) */
-    uint16_t adc_raw;          /**< ADC原始值 */
-    int16_t adc_offset;        /**< ADC零偏值 */
-    volatile uint32_t tim6_cnt;/**< TIM6中断计数 */
+    float target_speed[4];    /**< 目标速度 (rad/s) */
+    float actual_speed[4];    /**< 实际速度 (rad/s) */
+    float speed_error[4];     /**< 速度误差 (rad/s) */
+    int16_t pwm_out[4];       /**< PWM输出值 */
+    float current[4];         /**< 电流 (A) */
+    float angle[4];           /**< 角度 (rad) */
+    int16_t enc_raw[4];       /**< 编码器原始计数 */
+    volatile uint32_t tim6_cnt;
 } debug_data;
 
 /* ==================== Task Handle ==================== */
@@ -59,28 +57,46 @@ void sense_task_entry(void *argument)
 {
     uint32_t wake_time = osKernelSysTick();
 
-    /* 使能电机控制, 设置MOTOR2恒力矩模式 */
     Motor_Ctrl_Enable();
-    Motor_SetTorque(1, MOTOR2_TARGET_TORQUE);
+    Motor_SetSpeed(0, MOTOR1_TARGET_SPEED);
+    Motor_SetSpeed(1, MOTOR2_TARGET_SPEED);
+    Motor_SetSpeed(2, MOTOR3_TARGET_SPEED);
+    Motor_SetSpeed(3, MOTOR4_TARGET_SPEED);
 
     for (;;) {
-        debug_data.target_torque = MOTOR2_TARGET_TORQUE;
-        debug_data.actual_torque = Motor_GetTorque(1);
-        debug_data.actual_current = Motor_GetCurrent(1);
-        debug_data.pwm_out       = motor_data[1].pwm_out;
-        debug_data.torque_error  = debug_data.target_torque - debug_data.actual_torque;
-        debug_data.adc_raw       = current_sense.adc_raw[1];
-        debug_data.adc_offset    = current_sense.offset[1];
-        debug_data.tim6_cnt      = tim6_irq_count;
+        /* 采集四电机数据 */
+        debug_data.target_speed[0] = MOTOR1_TARGET_SPEED;
+        debug_data.target_speed[1] = MOTOR2_TARGET_SPEED;
+        debug_data.target_speed[2] = MOTOR3_TARGET_SPEED;
+        debug_data.target_speed[3] = MOTOR4_TARGET_SPEED;
 
-        Vofa_SetData(&sense_vofa, 0, debug_data.target_torque);
-        Vofa_SetData(&sense_vofa, 1, debug_data.actual_torque);
-        Vofa_SetData(&sense_vofa, 2, debug_data.actual_current);
-        Vofa_SetData(&sense_vofa, 3, (float)debug_data.pwm_out);
-        Vofa_SetData(&sense_vofa, 4, debug_data.torque_error);
-        Vofa_SetData(&sense_vofa, 5, (float)debug_data.adc_raw);
-        Vofa_SetData(&sense_vofa, 6, (float)debug_data.adc_offset);
-        Vofa_SetData(&sense_vofa, 7, (float)debug_data.tim6_cnt);
+        for (uint8_t i = 0; i < 4; i++) {
+            debug_data.actual_speed[i] = Motor_GetSpeed(i);
+            debug_data.speed_error[i]  = debug_data.target_speed[i] - debug_data.actual_speed[i];
+            debug_data.pwm_out[i]      = motor_data[i].pwm_out;
+            debug_data.current[i]      = Motor_GetCurrent(i);
+            debug_data.angle[i]        = Motor_GetAngle(i);
+        }
+
+        debug_data.enc_raw[0] = (int16_t)(hlptim1.Instance->CNT);
+        debug_data.enc_raw[1] = (int16_t)(hlptim2.Instance->CNT);
+        debug_data.enc_raw[2] = (int16_t)__HAL_TIM_GET_COUNTER(&htim4);
+        debug_data.enc_raw[3] = (int16_t)__HAL_TIM_GET_COUNTER(&htim5);
+        debug_data.tim6_cnt   = tim6_irq_count;
+
+        /* VOFA+ 12通道: 4 target + 4 actual + 4 current */
+        Vofa_SetData(&sense_vofa, 0,  debug_data.target_speed[0]);
+        Vofa_SetData(&sense_vofa, 1,  debug_data.target_speed[1]);
+        Vofa_SetData(&sense_vofa, 2,  debug_data.target_speed[2]);
+        Vofa_SetData(&sense_vofa, 3,  debug_data.target_speed[3]);
+        Vofa_SetData(&sense_vofa, 4,  debug_data.actual_speed[0]);
+        Vofa_SetData(&sense_vofa, 5,  debug_data.actual_speed[1]);
+        Vofa_SetData(&sense_vofa, 6,  debug_data.actual_speed[2]);
+        Vofa_SetData(&sense_vofa, 7,  debug_data.actual_speed[3]);
+        Vofa_SetData(&sense_vofa, 8,  debug_data.current[0]);
+        Vofa_SetData(&sense_vofa, 9,  debug_data.current[1]);
+        Vofa_SetData(&sense_vofa, 10, debug_data.current[2]);
+        Vofa_SetData(&sense_vofa, 11, debug_data.current[3]);
         Vofa_Transmit(&sense_vofa, &huart1);
 
         vTaskDelayUntil(&wake_time, SENSE_TASK_PERIOD);
@@ -91,7 +107,7 @@ void sense_task_entry(void *argument)
 
 void sense_task_init(void)
 {
-    Vofa_Init(&sense_vofa, 8);
+    Vofa_Init(&sense_vofa, 12);
 
     const osThreadAttr_t sense_task_attributes = {
         .name = "sense_task",
