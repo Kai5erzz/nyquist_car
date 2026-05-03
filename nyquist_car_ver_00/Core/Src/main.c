@@ -22,7 +22,6 @@
 #include "adc.h"
 #include "fdcan.h"
 #include "lptim.h"
-#include "stm32h7xx_hal_uart.h"
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
@@ -254,9 +253,6 @@ void MPU_Config(void)
   * @param  htim : TIM handle
   * @retval None
   */
-/* TIM6中断计数器 (在sense_task.c中定义) */
-extern volatile uint32_t tim6_irq_count;
-
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   /* USER CODE BEGIN Callback 0 */
@@ -266,15 +262,15 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   {
     HAL_IncTick();
   }
-  /* TIM6中断: 电机控制循环 500Hz */
-  if (htim->Instance == TIM6)
-  {
-    tim6_irq_count++;
-    Motor_Ctrl_Loop();
-  }
   /* USER CODE BEGIN Callback 1 */
 
   /* USER CODE END Callback 1 */
+  if (htim->Instance == TIM6)
+  {
+    extern volatile uint32_t tim6_irq_count;
+    tim6_irq_count++;
+    Motor_Ctrl_Loop();
+  }
 }
 
 /**

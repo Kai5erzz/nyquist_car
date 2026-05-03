@@ -1,7 +1,12 @@
 /**
- * @file ins_task.c
- * @brief IMU/INS惯性导航任务
- * @date 2026-04-04
+ * @file    ins_task.c
+ * @author  kaiser
+ * @version V1.0.0
+ * @date    2026-05-01
+ * @brief   IMU/INS惯性导航任务
+ *
+ * 工作模式: 应答式
+ *   每周期发送4个请求帧 → IMU回传数据 → CAN中断解析
  */
 
 #include "ins_task.h"
@@ -42,8 +47,7 @@ static void ins_update(void)
 }
 
 /**
- * @brief INS任务入口
- * @note  仅采集IMU数据并发布到uMCN, VOFA+输出由sense_task统一处理
+ * @brief INS任务入口 (1ms, 1000Hz)
  */
 __attribute__((noreturn))
 void ins_task_entry(void *argument)
@@ -51,6 +55,9 @@ void ins_task_entry(void *argument)
     uint32_t wake_time = osKernelSysTick();
 
     for (;;) {
+        /* 只请求欧拉角 (0x03), 1000Hz */
+        IMU_RequestData(&hfdcan1, IMU_CAN_ID, 0x03);
+
         ins_update();
         ins_pub_push();
 
@@ -60,8 +67,25 @@ void ins_task_entry(void *argument)
 
 void ins_task_init(void)
 {
-    /* 初始化IMU (主动上报模式) */
-    DM_IMU_Init(&hfdcan1, IMU_CAN_ID);
+    /* 初始化IMU数据结构 */
+    for (uint8_t i = 0; i < 3; i++) {
+        imu_data.accel[i] = 0;
+        imu_data.gyro[i] = 0;
+        imu_data.gyro_offset[i] = 0;
+    }
+    for (uint8_t i = 0; i < 4; i++) {
+        imu_data.q[i] = 0;
+    }
+    imu_data.pitch = 0;
+    imu_data.yaw = 0;
+    imu_data.roll = 0;
+    imu_data.temperature = 0;
+    imu_data.accel_scale = 1.0f;
+    imu_data.g_norm = 9.81f;
+    imu_data.timestamp = 0;
+    imu_data.data_flags = 0;
+    imu_data.is_calibrated = 0;
+    imu_data.frame_count = 0;
 
     const osThreadAttr_t ins_task_attributes = {
         .name = "ins_task",

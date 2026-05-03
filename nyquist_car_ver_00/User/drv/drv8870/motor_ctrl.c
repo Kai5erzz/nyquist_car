@@ -8,18 +8,16 @@
  * 控制架构:
  *   TIM6中断(500Hz)触发 Motor_Ctrl_Loop()
  *     1. 读取编码器 → 计算速度/角度
- *     2. 读取ADC电流 → 计算力矩
- *     3. 根据控制模式计算PID输出
- *     4. 设置DRV8870 PWM
+ *     2. 根据控制模式计算PID输出
+ *     3. 设置DRV8870 PWM
  *
  * PID参数:
- *   速度环: Kp=10, Ki=0.1, Kd=0
+ *   速度环: Kp=120, Ki=10, Kd=0.01
  *   位置环: Kp=5, Ki=0, Kd=0.5 (输出为速度命令)
  */
 
 #include "motor_ctrl.h"
 #include "drv8870.h"
-#include "current_sense.h"
 #include "tim.h"
 #include "lptim.h"
 #include <math.h>
@@ -41,7 +39,9 @@
 
 Motor_Data_t motor_data[MOTOR_NUM];
 
-/* 编码器方向修正: 1=正向, -1=反向 (仅限A/B相硬件接反时使用) */
+/* 编码器方向修正: 1=正向, -1=反向
+ * ⚠️ 取反会创建正反馈导致电机疯转, 唯一解法是物理交换编码器A/B相线
+ * MOTOR1/3/4 正速度=反转, 需要交换编码器线后改为1 */
 static const int8_t enc_dir[MOTOR_NUM] = {1, 1, 1, 1};
 
 static volatile uint8_t motor_enabled = 0;
@@ -106,12 +106,11 @@ static float PID_Calculate(float error, float *integrator,
 
 /**
  * @brief  初始化电机控制模块
- * @note   依次初始化: DRV8870→电流采样→TIM编码器→LPTIM编码器→TIM6中断
+ * @note   依次初始化: DRV8870→TIM编码器→LPTIM编码器→TIM6中断
  */
 void Motor_Ctrl_Init(void)
 {
     DRV8870_Init();
-    Current_Sense_Init();
 
     HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL);
     HAL_TIM_Encoder_Start(&htim5, TIM_CHANNEL_ALL);
@@ -122,9 +121,6 @@ void Motor_Ctrl_Init(void)
     for (uint8_t i = 0; i < MOTOR_NUM; i++) {
         motor_data[i].speed = 0;
         motor_data[i].angle = 0;
-        motor_data[i].torque = 0;
-        motor_data[i].current = 0;
-        motor_data[i].target_torque = 0;
         motor_data[i].target_speed = 0;
         motor_data[i].target_angle = 0;
         motor_data[i].pwm_out = 0;
@@ -142,20 +138,15 @@ void Motor_Ctrl_Init(void)
  * @brief  电机控制主循环 (TIM6中断调用, 500Hz)
  *
  * 执行流程:
- *   1. ADC读取4路电流
- *   2. 编码器读取 → 速度/角度计算
- *   3. 力矩计算: torque = current × Kt
- *   4. 根据控制模式执行PID
- *   5. 输出PWM到DRV8870
+ *   1. 编码器读取 → 速度/角度计算
+ *   2. 根据控制模式执行PID
+ *   3. 输出PWM到DRV8870
  */
 void Motor_Ctrl_Loop(void)
 {
     float dt = 1.0f / CTRL_FREQ;
 
-    /* 1. 读取电流 */
-    Current_Sense_ReadAll();
-
-    /* 2. 编码器 → 速度/角度/力矩 */
+    /* 1. 编码器 → 速度/角度 */
     for (uint8_t i = 0; i < MOTOR_NUM; i++) {
         int32_t enc_now = Motor_ReadEncoder(i);
         int32_t delta = enc_now - encoder_prev[i];
@@ -168,25 +159,13 @@ void Motor_Ctrl_Loop(void)
 
         motor_data[i].speed   = (float)delta * RAD_PER_COUNT * CTRL_FREQ;
         motor_data[i].angle   = (float)encoder_total[i] * RAD_PER_COUNT;
-        motor_data[i].current = Current_Sense_GetCurrent(i);
-        motor_data[i].torque  = motor_data[i].current * MOTOR_KT;
     }
 
     if (!motor_enabled) return;
 
-    /* 3. 控制模式计算 */
+    /* 2. 控制模式计算 */
     for (uint8_t i = 0; i < MOTOR_NUM; i++) {
         switch (motor_data[i].mode) {
-            case MOTOR_MODE_TORQUE: {
-                /* 力矩环: 简单比例控制, 不用PID */
-                /* 电流→力矩: torque = current × Kt */
-                /* 力矩→PWM:  pwm = (torque_error / Kt) × (max_duty / V_supply) */
-                /* 简化: pwm = torque_error × TORQUE_KP */
-                #define TORQUE_KP  3000.0f  /* 力矩比例增益, 可调 */
-                float torque_error = motor_data[i].target_torque - motor_data[i].torque;
-                motor_data[i].pwm_out = (int16_t)(torque_error * TORQUE_KP);
-                break;
-            }
             case MOTOR_MODE_SPEED: {
                 float speed_error = motor_data[i].target_speed - motor_data[i].speed;
                 motor_data[i].pwm_out = (int16_t)PID_Calculate(
@@ -259,39 +238,7 @@ float Motor_GetAngle(uint8_t index)
     return (index < MOTOR_NUM) ? motor_data[index].angle : 0;
 }
 
-/**
- * @brief  获取电动力矩
- * @param  index  电机索引 [0, 3]
- * @return 力矩 (N·m), 越界返回0
- */
-float Motor_GetTorque(uint8_t index)
-{
-    return (index < MOTOR_NUM) ? motor_data[index].torque : 0;
-}
-
-/**
- * @brief  获取电机电流
- * @param  index  电机索引 [0, 3]
- * @return 电流 (A), 越界返回0
- */
-float Motor_GetCurrent(uint8_t index)
-{
-    return (index < MOTOR_NUM) ? motor_data[index].current : 0;
-}
-
 /* ==================== 控制命令函数 ==================== */
-
-/**
- * @brief  设置恒力矩模式并指定目标力矩
- * @param  index   电机索引 [0, 3]
- * @param  torque  目标力矩 (N·m)
- */
-void Motor_SetTorque(uint8_t index, float torque)
-{
-    if (index >= MOTOR_NUM) return;
-    motor_data[index].target_torque = torque;
-    motor_data[index].mode = MOTOR_MODE_TORQUE;
-}
 
 /**
  * @brief  设置恒速度模式并指定目标速度

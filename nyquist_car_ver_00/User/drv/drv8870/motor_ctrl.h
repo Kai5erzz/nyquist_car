@@ -7,15 +7,14 @@
  *
  * 功能:
  *   - 编码器速度/角度反馈
- *   - ADC电流/力矩反馈
- *   - 三种控制模式: 恒力矩、恒速度、恒位置
+ *   - 两种控制模式: 恒速度、恒位置
  *   - 位置环级联速度环PID
  *
  * 电机-外设映射:
- *   MOTOR1: LPTIM1编码器(PG11/12), TIM3 CH1/2 PWM, ADC CH18 电流
- *   MOTOR2: LPTIM2编码器(PD11/12), TIM3 CH3/4 PWM, ADC CH10 电流
- *   MOTOR3: TIM4编码器(PB6/7),    TIM2 CH1/2 PWM, ADC CH11 电流
- *   MOTOR4: TIM5编码器(PA0/1),    TIM2 CH3/4 PWM, ADC CH4  电流
+ *   MOTOR1: LPTIM1编码器(PG11/12), TIM3 CH1/2 PWM
+ *   MOTOR2: LPTIM2编码器(PD11/12), TIM3 CH3/4 PWM
+ *   MOTOR3: TIM4编码器(PB6/7),    TIM2 CH1/2 PWM
+ *   MOTOR4: TIM5编码器(PA0/1),    TIM2 CH3/4 PWM
  */
 
 #ifndef MOTOR_CTRL_H
@@ -26,7 +25,6 @@
 #define MOTOR_NUM  4
 
 /* ==================== 电机参数宏 (用户可修改) ==================== */
-#define MOTOR_KT            0.01f      /**< 力矩常数 (N·m/A) */
 #define ENCODER_PPR         13         /**< 编码器线数 */
 #define ENCODER_RATIO       20.0f      /**< 减速比 */
 #define WHEEL_RADIUS        0.048f     /**< 轮半径 (m) */
@@ -36,7 +34,6 @@
  */
 typedef enum {
     MOTOR_MODE_DISABLE = 0, /**< 失能, PWM=0 */
-    MOTOR_MODE_TORQUE,      /**< 恒力矩输出 */
     MOTOR_MODE_SPEED,       /**< 恒速度输出 */
     MOTOR_MODE_POSITION,    /**< 恒位置输出 (级联速度环) */
 } Motor_Mode_e;
@@ -48,11 +45,8 @@ typedef struct {
     /* 反馈量 */
     float speed;            /**< 速度反馈 (rad/s) */
     float angle;            /**< 角度反馈 (rad) */
-    float torque;           /**< 力矩反馈 (N·m), = current × Kt */
-    float current;          /**< 电流反馈 (A) */
 
     /* 目标量 */
-    float target_torque;    /**< 目标力矩 (N·m) */
     float target_speed;     /**< 目标速度 (rad/s) */
     float target_angle;     /**< 目标角度 (rad) */
 
@@ -75,7 +69,7 @@ void Motor_Ctrl_Init(void);
 
 /**
  * @brief  电机控制主循环
- * @note   在TIM6中断中调用 (500Hz), 包含: 编码器读取→电流读取→PID计算→PWM输出
+ * @note   在TIM6中断中调用 (500Hz), 包含: 编码器读取→PID计算→PWM输出
  */
 void Motor_Ctrl_Loop(void);
 
@@ -105,28 +99,7 @@ float Motor_GetSpeed(uint8_t index);
  */
 float Motor_GetAngle(uint8_t index);
 
-/**
- * @brief  获取电动力矩
- * @param  index  电机索引 [0, 3]
- * @return 力矩 (N·m)
- */
-float Motor_GetTorque(uint8_t index);
-
-/**
- * @brief  获取电机电流
- * @param  index  电机索引 [0, 3]
- * @return 电流 (A)
- */
-float Motor_GetCurrent(uint8_t index);
-
 /* ==================== 控制命令函数 ==================== */
-
-/**
- * @brief  设置恒力矩模式
- * @param  index   电机索引 [0, 3]
- * @param  torque  目标力矩 (N·m)
- */
-void Motor_SetTorque(uint8_t index, float torque);
 
 /**
  * @brief  设置恒速度模式
