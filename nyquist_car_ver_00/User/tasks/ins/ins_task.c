@@ -44,6 +44,7 @@ static void ins_update(void)
     ins_data.roll     = imu_data.roll;
     ins_data.pitch    = imu_data.pitch;
     ins_data.yaw      = imu_data.yaw;
+    ins_data.yaw_total_angle = imu_data.yaw_total;
 }
 
 /**

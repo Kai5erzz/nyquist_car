@@ -110,6 +110,9 @@ void DM_IMU_Init(FDCAN_HandleTypeDef *hfdcan, uint16_t can_id)
     imu_data.pitch = 0;
     imu_data.yaw = 0;
     imu_data.roll = 0;
+    imu_data.yaw_total = 0;
+    imu_data.roll_total = 0;
+    imu_data.pitch_total = 0;
     imu_data.temperature = 0;
     imu_data.accel_scale = 1.0f;
     imu_data.g_norm = DEFAULT_G_NORM;
@@ -198,18 +201,55 @@ static void DM_IMU_ParseGyro(uint8_t *pData)
 /**
  * @brief  解析欧拉角数据帧 (pData[0]=0x03)
  * @param  pData  8字节CAN数据
- * @note   pitch=俯仰, yaw=航向, roll=横滚
+ * @note   pitch=俯仰[-90,90], yaw=航向[-180,180], roll=横滚[-180,180]
+ *         同时更新累加角度 (yaw_total/roll_total/pitch_total), 用于角度闭环
  */
 static void DM_IMU_ParseEuler(uint8_t *pData)
 {
+    static float prev_yaw = 0, prev_roll = 0, prev_pitch = 0;
+    static uint8_t first_frame = 1;
+
     uint16_t raw[3];
     raw[0] = (pData[3] << 8) | pData[2];
     raw[1] = (pData[5] << 8) | pData[4];
     raw[2] = (pData[7] << 8) | pData[6];
 
-    imu_data.pitch = uint_to_float_impl(raw[0], PITCH_CAN_MIN, PITCH_CAN_MAX, 16);
-    imu_data.yaw   = uint_to_float_impl(raw[1], YAW_CAN_MIN,   YAW_CAN_MAX,   16);
-    imu_data.roll  = uint_to_float_impl(raw[2], ROLL_CAN_MIN,  ROLL_CAN_MAX,  16);
+    float new_pitch = uint_to_float_impl(raw[0], PITCH_CAN_MIN, PITCH_CAN_MAX, 16);
+    float new_yaw   = uint_to_float_impl(raw[1], YAW_CAN_MIN,   YAW_CAN_MAX,   16);
+    float new_roll  = uint_to_float_impl(raw[2], ROLL_CAN_MIN,  ROLL_CAN_MAX,  16);
+
+    if (first_frame) {
+        /* 首帧: 初始化累加角度, 不计算delta */
+        imu_data.yaw_total   = new_yaw;
+        imu_data.roll_total  = new_roll;
+        imu_data.pitch_total = new_pitch;
+        first_frame = 0;
+    } else {
+        /* 计算delta并处理环绕 (±180 → ∓180 的跳变) */
+        float d_yaw = new_yaw - prev_yaw;
+        if (d_yaw > 180.0f)  d_yaw -= 360.0f;
+        if (d_yaw < -180.0f) d_yaw += 360.0f;
+        imu_data.yaw_total += d_yaw;
+
+        float d_roll = new_roll - prev_roll;
+        if (d_roll > 180.0f)  d_roll -= 360.0f;
+        if (d_roll < -180.0f) d_roll += 360.0f;
+        imu_data.roll_total += d_roll;
+
+        float d_pitch = new_pitch - prev_pitch;
+        /* pitch范围[-90,90], 环绕阈值用180 */
+        if (d_pitch > 180.0f)  d_pitch -= 360.0f;
+        if (d_pitch < -180.0f) d_pitch += 360.0f;
+        imu_data.pitch_total += d_pitch;
+    }
+
+    prev_yaw   = new_yaw;
+    prev_roll  = new_roll;
+    prev_pitch = new_pitch;
+
+    imu_data.pitch = new_pitch;
+    imu_data.yaw   = new_yaw;
+    imu_data.roll  = new_roll;
     imu_data.data_flags |= IMU_FLAG_EULER_READY;
 }
 

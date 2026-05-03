@@ -68,9 +68,12 @@ typedef struct {
     /* 原始数据 */
     float accel[3];       /**< 加速度 [X,Y,Z] (m/s^2), 已校准 */
     float gyro[3];        /**< 角速度 [X,Y,Z] (rad/s), 已去偏 */
-    float pitch;           /**< 俯仰角 (deg) */
-    float yaw;             /**< 航向角 (deg) */
-    float roll;            /**< 横滚角 (deg) */
+    float pitch;           /**< 俯仰角 (deg), [-90, 90] */
+    float yaw;             /**< 航向角 (deg), [-180, 180] */
+    float roll;            /**< 横滚角 (deg), [-180, 180] */
+    float yaw_total;       /**< 航向累加角 (deg), 无环绕, 用于角度闭环 */
+    float roll_total;      /**< 横滚累加角 (deg), 无环绕 */
+    float pitch_total;     /**< 俯仰累加角 (deg), 无环绕 */
     float q[4];            /**< 四元数 [W,X,Y,Z] */
     float temperature;     /**< 温度 (°C) */
 

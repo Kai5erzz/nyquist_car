@@ -20,6 +20,7 @@
 #include "main.h"
 #include "cmsis_os.h"
 #include "adc.h"
+#include "dma.h"
 #include "fdcan.h"
 #include "lptim.h"
 #include "tim.h"
@@ -32,6 +33,7 @@
 #include "drv/drv8870/motor_ctrl.h"
 #include "stm32h7xx_hal.h"
 #include "stm32h7xx_hal_gpio.h"
+#include "drv/btb_cmd/uart_protocol_dma.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -100,6 +102,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_FDCAN1_Init();
   MX_LPTIM1_Init();
   MX_LPTIM2_Init();
@@ -110,6 +113,7 @@ int main(void)
   MX_USART1_UART_Init();
   MX_TIM6_Init();
   MX_ADC1_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
   // FDCAN滤波器配置: 接收IMU模块(0x11)的数据
   FDCAN_FilterTypeDef sFilterConfig;
@@ -125,6 +129,8 @@ int main(void)
   HAL_FDCAN_Start(&hfdcan1);
   HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0);
   HAL_UART_Transmit(&huart1, (uint8_t *)"hello", sizeof("hello"), 100);
+  /* 初始化串口DMA协议 (USART1) */
+  Protocol_Init_DMA(&huart1);
   /* 初始化电机控制 (TIM6中断驱动) */
   Motor_Ctrl_Init();
 
@@ -214,6 +220,16 @@ void SystemClock_Config(void)
 
 /* USER CODE BEGIN 4 */
 
+/**
+ * @brief  DMA空闲中断回调 → 喂给协议状态机
+ */
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
+{
+    if (huart->Instance == USART1) {
+        Protocol_DMA_RxEvent_Handler(huart, Size);
+    }
+}
+
 /* USER CODE END 4 */
 
  /* MPU Configuration */
@@ -263,14 +279,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     HAL_IncTick();
   }
   /* USER CODE BEGIN Callback 1 */
-
-  /* USER CODE END Callback 1 */
-  if (htim->Instance == TIM6)
-  {
-    extern volatile uint32_t tim6_irq_count;
-    tim6_irq_count++;
+  if (htim->Instance == TIM6) {
     Motor_Ctrl_Loop();
   }
+  /* USER CODE END Callback 1 */
 }
 
 /**

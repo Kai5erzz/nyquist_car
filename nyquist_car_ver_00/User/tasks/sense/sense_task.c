@@ -1,14 +1,13 @@
 /**
  * @file    sense_task.c
  * @author  kaiser
- * @version V2.4.0
- * @date    2026-05-02
- * @brief   巡线主任务 (纯PD差速控制，大KP强制过弯)
+ * @version V5.0.0
+ * @date    2026-05-03
+ * @brief   巡线 + 直角弯角度环融合 (模块化版本)
  *
- * 操作流程:
- * 1. 按KEY0 → 灰度黑白校准 (先黑后白, 各响一声)
- * 2. 校准完成 → LED0常亮
- * 3. 按KEY2 → 开始10秒巡线
+ * 流程:
+ *   校准 → 巡线 → 检测到弯道 → 角度环转70° → 回到巡线
+ *   巡线 → 检测到十字 → 停车
  */
 
 #include "sense_task.h"
@@ -17,56 +16,60 @@
 #include "robot.h"
 #include "drv/drv8870/motor_ctrl.h"
 #include "drv/grayscale/grayscale.h"
+#include "drv/line_follow/line_follow.h"
+#include "drv/angle_ctrl/angle_ctrl.h"
+#include "drv/bmi088/bmi088.h"
 #include "drv/vofa/vofa_plus.h"
 #include "usart.h"
 #include "main.h"
-#include <math.h>
 
-/* ==================== 巡线参数 ==================== */
-#define LINE_BASE_SPEED   80.0f   /* 基础速度 (rad/s) */
-#define LINE_KP           120.0f  /* 巡线比例增益 (加大强制过弯) */
-#define LINE_KD           4.0f    /* 巡线微分增益 */
-#define LINE_DURATION_MS  10000   /* 巡线时长 (ms) */
-#define SEARCH_SPEED      60.0f   /* 彻底丢线时的搜索旋转速度 */
-
-/* ==================== 校准参数 ==================== */
-#define CAL_SAMPLE_COUNT  100
-#define CAL_SETTLE_MS     2000
-#define BEEP_DURATION_MS  200
+/* ==================== 参数 ==================== */
+#define LINE_DURATION_MS  10000   /* 巡线总时长 (ms) */
+#define ANGLE_TARGET_DEG  80.0f   /* 直角弯目标角度 */
+#define ANGLE_ERR_THRESH  3.0f    /* 角度误差阈值 (deg) */
+#define ANGLE_TIMEOUT_MS  2000    /* 角度环超时 (ms) */
+#define TURN_COOLDOWN_MS  1500    /* 弯道检测冷却 (ms) */
 
 /* ==================== 状态机 ==================== */
 typedef enum {
     STATE_IDLE = 0,
-    STATE_CAL_WAIT_BLACK,
-    STATE_CAL_BLACK,
-    STATE_CAL_BEEP1,
-    STATE_CAL_WAIT_WHITE,
-    STATE_CAL_WHITE,
-    STATE_CAL_BEEP2,
+    STATE_CALIBRATING,
     STATE_CAL_DONE,
-    STATE_LINE_RUNNING,
+    STATE_LINE_FOLLOWING,
+    STATE_ANGLE_TURNING,
     STATE_LINE_STOP,
 } SystemState_e;
 
-/* ==================== 全局调试数据 ==================== */
+/* ==================== 调试数据 ==================== */
 struct {
     float line_error;
-    float base_speed;
     float left_speed;
     float right_speed;
-    float motor_speed[4];
     uint8_t gray_digital;
+    uint8_t line_result;
+    float target_angle;
+    float current_angle;
+    float angle_error;
+    float pid_output;
     SystemState_e state;
-    uint32_t line_timer;
-    float prev_error;
+    float yaw;
+    float yaw_total;
+    float gyro_z;
 } debug_data;
 
 /* ==================== Task Handle ==================== */
 osThreadId_t senseTaskHandle;
 
-/* ==================== VOFA+ ==================== */
+/* ==================== 模块实例 ==================== */
 static Vofa_Instance_t sense_vofa;
-volatile uint32_t tim6_irq_count = 0;
+static AngleCtrl_t angle_ctrl;
+
+static const float motor_dir_sign[MOTOR_NUM] = {
+    -1.0f, 1.0f, -1.0f, -1.0f
+};
+
+static int8_t turn_sign = 0;
+static uint32_t last_turn_tick = 0;
 
 /* ==================== LED & 蜂鸣器 ==================== */
 static void LED_SetAll(uint8_t s0, uint8_t s1, uint8_t s2, uint8_t s3)
@@ -80,80 +83,37 @@ static void LED_SetAll(uint8_t s0, uint8_t s1, uint8_t s2, uint8_t s3)
 static void Beep(uint32_t duration_ms)
 {
     HAL_GPIO_WritePin(BEEP_GPIO_Port, BEEP_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(LED3_GPIO_Port, LED3_Pin, GPIO_PIN_SET);
+    LED_SetAll(0, 0, 0, 1);
     osDelay(duration_ms);
     HAL_GPIO_WritePin(BEEP_GPIO_Port, BEEP_Pin, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(LED3_GPIO_Port, LED3_Pin, GPIO_PIN_RESET);
+    LED_SetAll(0, 0, 0, 0);
 }
 
-static uint16_t cal_min[GRAYSCALE_CH_NUM];
-static uint16_t cal_max[GRAYSCALE_CH_NUM];
-
-static const float motor_dir_sign[MOTOR_NUM] = {
-    -1.0f,   /* MOTOR1: 取反 */
-     1.0f,   /* MOTOR2: 正常 */
-    -1.0f,   /* MOTOR3: 取反 */
-    -1.0f,   /* MOTOR4: 取反 */
-};
-
-/* ==================== 巡线控制 ==================== */
-static float last_error_sign = 1.0f;
-
-static void LineFollow_Step(void)
+/* ==================== 电机控制封装 ==================== */
+static void SetMotorSpeed(float left, float right)
 {
-    float error = debug_data.line_error;
-
-    /* 记录最后一次明显偏差的方向，防止冲出赛道后不知道往哪找 */
-    if (debug_data.gray_digital != 0 && fabsf(error) > 0.5f) {
-        last_error_sign = (error > 0) ? 1.0f : -1.0f;
-    }
-
-    float d_error = error - debug_data.prev_error;
-    debug_data.prev_error = error;
-
-    float left_speed, right_speed;
-
-    if (debug_data.gray_digital == 0) {
-        /* 彻底丢线：用最后记忆的方向原地急转找线 */
-        left_speed  =  SEARCH_SPEED * last_error_sign;
-        right_speed = -SEARCH_SPEED * last_error_sign;
-    } else {
-        /* 纯 PD 差速控制，大 KP 强制过弯 */
-        float turn = LINE_KP * error + LINE_KD * d_error;
-        left_speed  = LINE_BASE_SPEED + turn;
-        right_speed = LINE_BASE_SPEED - turn;
-    }
-
-    debug_data.left_speed  = left_speed;
-    debug_data.right_speed = right_speed;
-
-    Motor_SetSpeed(0, right_speed * motor_dir_sign[0]);
-    Motor_SetSpeed(1, right_speed * motor_dir_sign[1]);
-    Motor_SetSpeed(2, left_speed  * motor_dir_sign[2]);
-    Motor_SetSpeed(3, left_speed  * motor_dir_sign[3]);
-
-    debug_data.motor_speed[0] = Motor_GetSpeed(0);
-    debug_data.motor_speed[1] = Motor_GetSpeed(1);
-    debug_data.motor_speed[2] = Motor_GetSpeed(2);
-    debug_data.motor_speed[3] = Motor_GetSpeed(3);
+    debug_data.left_speed = left;
+    debug_data.right_speed = right;
+    Motor_SetSpeed(0, right * motor_dir_sign[0]);
+    Motor_SetSpeed(1, right * motor_dir_sign[1]);
+    Motor_SetSpeed(2, left  * motor_dir_sign[2]);
+    Motor_SetSpeed(3, left  * motor_dir_sign[3]);
 }
 
-/* ==================== VOFA+ 发送 ==================== */
+/* ==================== VOFA+ ==================== */
 static void Debug_VofaSend(void)
 {
     Vofa_SetData(&sense_vofa, 0,  debug_data.line_error);
     Vofa_SetData(&sense_vofa, 1,  debug_data.left_speed);
     Vofa_SetData(&sense_vofa, 2,  debug_data.right_speed);
-    Vofa_SetData(&sense_vofa, 3,  debug_data.motor_speed[0]);
-    Vofa_SetData(&sense_vofa, 4,  debug_data.motor_speed[1]);
-    Vofa_SetData(&sense_vofa, 5,  debug_data.motor_speed[2]);
-    Vofa_SetData(&sense_vofa, 6,  debug_data.motor_speed[3]);
-    Vofa_SetData(&sense_vofa, 7,  (float)motor_data[0].pwm_out);
-    Vofa_SetData(&sense_vofa, 8,  (float)motor_data[1].pwm_out);
-    Vofa_SetData(&sense_vofa, 9,  (float)debug_data.gray_digital);
-    Vofa_SetData(&sense_vofa, 10, (float)debug_data.state);
-    Vofa_SetData(&sense_vofa, 11, (float)tim6_irq_count);
-    Vofa_Transmit(&sense_vofa, &huart1);
+    Vofa_SetData(&sense_vofa, 3,  (float)debug_data.line_result);
+    Vofa_SetData(&sense_vofa, 4,  debug_data.target_angle);
+    Vofa_SetData(&sense_vofa, 5,  debug_data.current_angle);
+    Vofa_SetData(&sense_vofa, 6,  debug_data.angle_error);
+    Vofa_SetData(&sense_vofa, 7,  debug_data.pid_output);
+    Vofa_SetData(&sense_vofa, 8,  debug_data.yaw_total);
+    Vofa_SetData(&sense_vofa, 9,  (float)debug_data.state);
+    Vofa_Transmit(&sense_vofa, &huart2);
 }
 
 /* ==================== 任务入口 ==================== */
@@ -161,14 +121,19 @@ __attribute__((noreturn))
 void sense_task_entry(void *argument)
 {
     SystemState_e state = STATE_IDLE;
+    uint32_t tick_ms = 0;
     uint32_t state_tick = 0;
-
-    debug_data.prev_error = 0;
+    uint32_t angle_start_tick = 0;
 
     for (;;) {
-        uint32_t now = osKernelGetTickCount();
+        uint32_t now = tick_ms;
+
+        debug_data.yaw       = imu_data.yaw;
+        debug_data.yaw_total = imu_data.yaw_total;
+        debug_data.gyro_z    = imu_data.gyro[2];
 
         switch (state) {
+        /* ==================== IDLE ==================== */
         case STATE_IDLE:
             Motor_Ctrl_Disable();
             LED_SetAll(0, 0, 0, 0);
@@ -177,103 +142,120 @@ void sense_task_entry(void *argument)
             if (HAL_GPIO_ReadPin(KEY0_GPIO_Port, KEY0_Pin) == GPIO_PIN_SET) {
                 osDelay(50);
                 if (HAL_GPIO_ReadPin(KEY0_GPIO_Port, KEY0_Pin) == GPIO_PIN_SET) {
-                    state = STATE_CAL_WAIT_BLACK;
-                    state_tick = osKernelGetTickCount();
+                    Beep(200);
+                    state = STATE_CALIBRATING;
+                    state_tick = now;
                 }
             }
             break;
 
-        case STATE_CAL_WAIT_BLACK:
+        /* ==================== 校准 (调用 grayscale 库) ==================== */
+        case STATE_CALIBRATING:
             LED_SetAll(0, 1, 0, 0);
-            if (now - state_tick >= CAL_SETTLE_MS) {
-                for (uint8_t i = 0; i < GRAYSCALE_CH_NUM; i++)
-                    cal_min[i] = 65535;
-                state = STATE_CAL_BLACK;
-            }
-            break;
-
-        case STATE_CAL_BLACK:
-            LED_SetAll(0, 1, 1, 0);
-            for (uint16_t n = 0; n < CAL_SAMPLE_COUNT; n++) {
-                for (uint8_t i = 0; i < GRAYSCALE_CH_NUM; i++) {
-                    uint16_t s = Grayscale_ReadChannel(i);
-                    if (s < cal_min[i]) cal_min[i] = s;
-                }
-                osDelay(1);
-            }
-            state = STATE_CAL_BEEP1;
-            break;
-
-        case STATE_CAL_BEEP1:
-            Beep(BEEP_DURATION_MS);
-            state = STATE_CAL_WAIT_WHITE;
-            state_tick = osKernelGetTickCount();
-            break;
-
-        case STATE_CAL_WAIT_WHITE:
-            LED_SetAll(0, 0, 1, 0);
-            if (now - state_tick >= CAL_SETTLE_MS) {
-                for (uint8_t i = 0; i < GRAYSCALE_CH_NUM; i++)
-                    cal_max[i] = 0;
-                state = STATE_CAL_WHITE;
-            }
-            break;
-
-        case STATE_CAL_WHITE:
-            LED_SetAll(0, 0, 1, 1);
-            for (uint16_t n = 0; n < CAL_SAMPLE_COUNT; n++) {
-                for (uint8_t i = 0; i < GRAYSCALE_CH_NUM; i++) {
-                    uint16_t s = Grayscale_ReadChannel(i);
-                    if (s > cal_max[i]) cal_max[i] = s;
-                }
-                osDelay(1);
-            }
-            for (uint8_t i = 0; i < GRAYSCALE_CH_NUM; i++) {
-                if (cal_max[i] <= cal_min[i])
-                    cal_max[i] = cal_min[i] + 1;
-                grayscale.cal_min[i] = cal_min[i];
-                grayscale.cal_max[i] = cal_max[i];
-            }
-            grayscale.is_calibrated = 1;
-            state = STATE_CAL_BEEP2;
-            break;
-
-        case STATE_CAL_BEEP2:
-            Beep(BEEP_DURATION_MS);
+            Grayscale_Calibrate();  /* 阻塞 ~5s, 内含采样逻辑 */
+            Beep(200);
             LED_SetAll(1, 0, 0, 0);
             state = STATE_CAL_DONE;
             break;
 
+        /* ==================== 等待启动巡线 ==================== */
         case STATE_CAL_DONE:
             if (HAL_GPIO_ReadPin(KEY2_GPIO_Port, KEY2_Pin) == GPIO_PIN_SET) {
                 osDelay(50);
                 if (HAL_GPIO_ReadPin(KEY2_GPIO_Port, KEY2_Pin) == GPIO_PIN_SET) {
                     Motor_Ctrl_Enable();
-                    debug_data.prev_error = 0;
-                    state_tick = osKernelGetTickCount();
-                    state = STATE_LINE_RUNNING;
+                    LineFollow_Init();
+                    AngleCtrl_Init(&angle_ctrl);
+                    imu_data.yaw_total = 0;
+                    state_tick = now;
+                    state = STATE_LINE_FOLLOWING;
                 }
             }
             break;
 
-        case STATE_LINE_RUNNING:
+        /* ==================== 巡线 ==================== */
+        case STATE_LINE_FOLLOWING: {
             Grayscale_ReadAll();
-            debug_data.line_error = Grayscale_GetLineError();
             debug_data.gray_digital = Grayscale_GetDigitalByte();
-            LineFollow_Step();
-            {
-                float e = debug_data.line_error;
-                LED_SetAll(1, (e < -0.3f) ? 1 : 0,
-                           (e >  0.3f) ? 1 : 0,
-                           (e >= -0.3f && e <= 0.3f) ? 1 : 0);
+            debug_data.line_error = Grayscale_GetLineError();
+
+            LineFollow_Update(debug_data.gray_digital, debug_data.line_error);
+            LineFollow_Result_e result = LineFollow_GetResult();
+            debug_data.line_result = (uint8_t)result;
+
+            float left, right;
+            LineFollow_GetSpeed(&left, &right);
+            SetMotorSpeed(left, right);
+
+            /* LED指示 */
+            switch (result) {
+                case LINE_LEFT_TURN:  LED_SetAll(1, 1, 0, 0); break;
+                case LINE_RIGHT_TURN: LED_SetAll(0, 0, 1, 1); break;
+                case LINE_CROSS:      LED_SetAll(1, 1, 1, 1); break;
+                case LINE_LOST:       LED_SetAll(0, 0, 0, 0); break;
+                default: {
+                    float e = debug_data.line_error;
+                    LED_SetAll(1, (e < -0.3f) ? 1 : 0,
+                               (e >  0.3f) ? 1 : 0,
+                               (e >= -0.3f && e <= 0.3f) ? 1 : 0);
+                    break;
+                }
             }
-            if (now - state_tick >= LINE_DURATION_MS) {
+
+            /* 弯道检测 (带冷却) */
+            if (result == LINE_LEFT_TURN && (now - last_turn_tick >= TURN_COOLDOWN_MS)) {
+                turn_sign = +1;
+                AngleCtrl_SetTarget(&angle_ctrl, imu_data.yaw_total + ANGLE_TARGET_DEG);
+                debug_data.target_angle = angle_ctrl.target;
+                angle_start_tick = now;
+                state = STATE_ANGLE_TURNING;
+            }
+            else if (result == LINE_RIGHT_TURN && (now - last_turn_tick >= TURN_COOLDOWN_MS)) {
+                turn_sign = -1;
+                AngleCtrl_SetTarget(&angle_ctrl, imu_data.yaw_total - ANGLE_TARGET_DEG);
+                debug_data.target_angle = angle_ctrl.target;
+                angle_start_tick = now;
+                state = STATE_ANGLE_TURNING;
+            }
+            else if (result == LINE_CROSS) {
+                state = STATE_LINE_STOP;
+            }
+            else if (now - state_tick >= LINE_DURATION_MS) {
                 state = STATE_LINE_STOP;
             }
             break;
+        }
 
+        /* ==================== 角度环转弯 ==================== */
+        case STATE_ANGLE_TURNING: {
+            float turn = AngleCtrl_Update(&angle_ctrl, imu_data.yaw_total);
+            debug_data.pid_output = turn;
+            debug_data.current_angle = imu_data.yaw_total;
+            debug_data.angle_error = angle_ctrl.error;
+
+            float left, right;
+            AngleCtrl_ToWheelSpeed(turn, &left, &right);
+            SetMotorSpeed(left, right);
+
+            LED_SetAll(
+                (turn_sign > 0) ? 1 : 0,
+                (turn_sign > 0) ? 1 : 0,
+                (turn_sign < 0) ? 1 : 0,
+                (turn_sign < 0) ? 1 : 0);
+
+            if (AngleCtrl_IsDone(&angle_ctrl, ANGLE_ERR_THRESH) ||
+                (now - angle_start_tick >= ANGLE_TIMEOUT_MS)) {
+                last_turn_tick = now;
+                LineFollow_Init();
+                state = STATE_LINE_FOLLOWING;
+            }
+            break;
+        }
+
+        /* ==================== 停车 ==================== */
         case STATE_LINE_STOP:
             Motor_Ctrl_Disable();
+            SetMotorSpeed(0, 0);
             LED_SetAll(1, 1, 1, 1);
             osDelay(1000);
             LED_SetAll(0, 0, 0, 0);
@@ -282,9 +264,9 @@ void sense_task_entry(void *argument)
         }
 
         debug_data.state = state;
-        debug_data.line_timer = now - state_tick;
         Debug_VofaSend();
 
+        tick_ms += SENSE_TASK_PERIOD;
         osDelay(SENSE_TASK_PERIOD);
     }
 }
@@ -292,8 +274,10 @@ void sense_task_entry(void *argument)
 /* ==================== 任务初始化 ==================== */
 void sense_task_init(void)
 {
-    Vofa_Init(&sense_vofa, 12);
+    Vofa_Init(&sense_vofa, 10);
     Grayscale_Init();
+    LineFollow_Init();
+    AngleCtrl_Init(&angle_ctrl);
 
     const osThreadAttr_t sense_task_attributes = {
         .name = "sense_task",
