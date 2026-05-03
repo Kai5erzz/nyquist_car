@@ -29,6 +29,38 @@ typedef struct {
 extern ProtocolPacket_t RxPacket;     // 解析成功的完整数据包
 extern uint8_t Flag_NewDataReceived;  // 新数据接收标志位
 
+/* ==================== 命令码定义 ==================== */
+#define BTB_CMD_YOLO_DETECT   0x01   /* YOLO识别结果 */
+
+/* ==================== YOLO 数据结构 ==================== */
+#define YOLO_MAX_TARGETS      2      /* 最多识别2个目标 */
+
+/**
+ * @brief 单个YOLO目标
+ */
+typedef struct {
+    uint8_t  digit;          /**< 识别的数字 (0-9) */
+    uint16_t x;              /**< 中心X坐标 (0-415) */
+    uint16_t y;              /**< 中心Y坐标 (0-415) */
+} YoloTarget_t;
+
+/**
+ * @brief YOLO识别结果
+ */
+typedef struct {
+    uint8_t      count;                /**< 有效目标数量 (0-2) */
+    YoloTarget_t targets[YOLO_MAX_TARGETS]; /**< 目标数组 */
+} YoloDetect_t;
+
+extern YoloDetect_t yolo_detect;       /**< 最新识别结果 */
+
+/**
+ * @brief  解析YOLO识别数据 (从RxPacket.data解析到yolo_detect)
+ * @note   在收到 cmd=BTB_CMD_YOLO_DETECT 时调用
+ *         数据格式: [digit, xH, xL, yH, yL] × N (每目标5字节, 大端)
+ */
+void Yolo_ParseFromPacket(void);
+
 /* --- 函数声明 --- */
 
 /**

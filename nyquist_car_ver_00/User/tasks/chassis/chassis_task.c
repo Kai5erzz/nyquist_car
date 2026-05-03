@@ -20,6 +20,7 @@
 #include "drv/line_follow/line_follow.h"
 #include "drv/angle_ctrl/angle_ctrl.h"
 #include "drv/bmi088/bmi088.h"
+#include "drv/btb_cmd/uart_protocol_dma.h"
 #include "drv/vofa/vofa_plus.h"
 #include "usart.h"
 #include "main.h"
@@ -69,6 +70,14 @@ struct {
     float yaw;
     float yaw_total;
     float gyro_z;
+    /* YOLO */
+    uint8_t yolo_count;
+    uint8_t yolo_digit0;
+    float yolo_x0;
+    float yolo_y0;
+    uint8_t yolo_digit1;
+    float yolo_x1;
+    float yolo_y1;
 } chassis_dbg;
 
 /* ==================== Task Handle ==================== */
@@ -135,6 +144,13 @@ static void Chassis_VofaSend(void)
     Vofa_SetData(&chassis_vofa, 7,  chassis_dbg.pid_output);
     Vofa_SetData(&chassis_vofa, 8,  chassis_dbg.yaw_total);
     Vofa_SetData(&chassis_vofa, 9,  (float)chassis_dbg.state);
+    Vofa_SetData(&chassis_vofa, 10, (float)chassis_dbg.yolo_count);
+    Vofa_SetData(&chassis_vofa, 11, (float)chassis_dbg.yolo_digit0);
+    Vofa_SetData(&chassis_vofa, 12, chassis_dbg.yolo_x0);
+    Vofa_SetData(&chassis_vofa, 13, chassis_dbg.yolo_y0);
+    Vofa_SetData(&chassis_vofa, 14, (float)chassis_dbg.yolo_digit1);
+    Vofa_SetData(&chassis_vofa, 15, chassis_dbg.yolo_x1);
+    Vofa_SetData(&chassis_vofa, 16, chassis_dbg.yolo_y1);
     Vofa_Transmit(&chassis_vofa, &huart2);
 }
 
@@ -154,6 +170,19 @@ void chassis_task_entry(void *argument)
         chassis_dbg.yaw       = imu_data.yaw;
         chassis_dbg.yaw_total = imu_data.yaw_total;
         chassis_dbg.gyro_z    = imu_data.gyro[2];
+
+        /* 接收YOLO数据 */
+        if (Flag_NewDataReceived && RxPacket.cmd == BTB_CMD_YOLO_DETECT) {
+            Yolo_ParseFromPacket();
+            Flag_NewDataReceived = 0;
+            chassis_dbg.yolo_count  = yolo_detect.count;
+            chassis_dbg.yolo_digit0 = (yolo_detect.count > 0) ? yolo_detect.targets[0].digit : 0;
+            chassis_dbg.yolo_x0     = (yolo_detect.count > 0) ? (float)yolo_detect.targets[0].x : 0;
+            chassis_dbg.yolo_y0     = (yolo_detect.count > 0) ? (float)yolo_detect.targets[0].y : 0;
+            chassis_dbg.yolo_digit1 = (yolo_detect.count > 1) ? yolo_detect.targets[1].digit : 0;
+            chassis_dbg.yolo_x1     = (yolo_detect.count > 1) ? (float)yolo_detect.targets[1].x : 0;
+            chassis_dbg.yolo_y1     = (yolo_detect.count > 1) ? (float)yolo_detect.targets[1].y : 0;
+        }
 
         switch (state) {
         /* ==================== IDLE ==================== */
@@ -354,7 +383,7 @@ void chassis_task_entry(void *argument)
 /* ==================== 任务初始化 ==================== */
 void chassis_task_init(void)
 {
-    Vofa_Init(&chassis_vofa, 10);
+    Vofa_Init(&chassis_vofa, 17);
     Grayscale_Init();
     LineFollow_Init();
     AngleCtrl_Init(&angle_ctrl);

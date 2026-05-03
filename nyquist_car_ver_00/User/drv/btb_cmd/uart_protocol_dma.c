@@ -9,6 +9,7 @@
 /* --- 全局变量定义 --- */
 ProtocolPacket_t RxPacket;     // 暴露给外部的数据包
 uint8_t Flag_NewDataReceived = 0; // 暴露给外部的标志位
+YoloDetect_t yolo_detect;    // YOLO识别结果
 
 /* --- 内部私有变量 --- */
 static uint8_t DMA_RxBuffer[DMA_RX_BUFFER_SIZE]; // DMA专属搬运缓冲区
@@ -132,6 +133,29 @@ void Protocol_DMA_RxEvent_Handler(UART_HandleTypeDef *huart, uint16_t Size) {
 
     // 极其重要：一波数据处理完后，必须重新开启 DMA 接收，准备接下一波！
     HAL_UARTEx_ReceiveToIdle_DMA(huart, DMA_RxBuffer, DMA_RX_BUFFER_SIZE);
+}
+
+/* ==================== YOLO 数据解析 ==================== */
+/**
+ * @brief  解析YOLO识别数据包
+ * @note   数据格式: 每目标5字节 [digit, xH, xL, yH, yL], 大端序
+ *         调用时机: Flag_NewDataReceived==1 && RxPacket.cmd==BTB_CMD_YOLO_DETECT
+ */
+void Yolo_ParseFromPacket(void)
+{
+    yolo_detect.count = 0;
+
+    /* 每目标5字节, 计算有效目标数 */
+    uint8_t num_targets = RxPacket.len / 5;
+    if (num_targets > YOLO_MAX_TARGETS) num_targets = YOLO_MAX_TARGETS;
+
+    for (uint8_t i = 0; i < num_targets; i++) {
+        uint8_t offset = i * 5;
+        yolo_detect.targets[i].digit = RxPacket.data[offset];
+        yolo_detect.targets[i].x = (RxPacket.data[offset + 1] << 8) | RxPacket.data[offset + 2];
+        yolo_detect.targets[i].y = (RxPacket.data[offset + 3] << 8) | RxPacket.data[offset + 4];
+        yolo_detect.count++;
+    }
 }
 /**************************使用案例************************/
 //
