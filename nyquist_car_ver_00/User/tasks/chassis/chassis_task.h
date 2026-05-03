@@ -1,7 +1,9 @@
 /**
- * @file chassis_task.h
- * @brief 底盘控制任务
- * @date 2026-04-04
+ * @file    chassis_task.h
+ * @author  kaiser
+ * @version V1.0.0
+ * @date    2026-05-03
+ * @brief   底盘控制任务 (巡线 + 角度环)
  */
 
 #ifndef CHASSIS_TASK_H
@@ -10,13 +12,13 @@
 #include "robot.h"
 
 /**
- * @brief 底盘控制任务初始化
+ * @brief  底盘任务初始化 (创建线程)
  */
 void chassis_task_init(void);
 
 /**
- * @brief 底盘控制任务主体
+ * @brief  底盘任务入口 (FreeRTOS线程函数)
  */
-void chassis_control_task(void);
+void chassis_task_entry(void *argument);
 
-#endif // CHASSIS_TASK_H
+#endif /* CHASSIS_TASK_H */

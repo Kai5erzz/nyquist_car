@@ -30,10 +30,9 @@ void robot_init(void)
     OS_task_init();
     mcn_topic_init();
 
-    sense_task_init();
     ins_task_init();
+    chassis_task_init();
     // motor_task_init();
-    // chassis_task_init();
     // cmd_task_init();
 
     __enable_irq();
