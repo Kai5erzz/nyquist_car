@@ -1,5 +1,6 @@
 //
 // Created by 欧克 on 2026/5/2.
+// 改为中断逐字节接收
 //
 
 #include "uart_protocol_dma.h"
@@ -7,15 +8,14 @@
 #include <string.h>
 
 /* --- 全局变量定义 --- */
-ProtocolPacket_t RxPacket;     // 暴露给外部的数据包
-uint8_t Flag_NewDataReceived = 0; // 暴露给外部的标志位
-YoloDetect_t yolo_detect;    // YOLO识别结果
+volatile ProtocolPacket_t RxPacket;
+volatile uint8_t Flag_NewDataReceived = 0;
+YoloDetect_t yolo_detect;
 
-/* --- 内部私有变量 --- */
-static uint8_t DMA_RxBuffer[DMA_RX_BUFFER_SIZE]; // DMA专属搬运缓冲区
-static uint8_t DMA_TxBuffer[DMA_RX_BUFFER_SIZE]; // DMA专属发送缓冲区
+/* --- 中断接收单字节缓冲 --- */
+static uint8_t rx_byte;
 
-/* 接收状态机枚举 */
+/* 接收状态机 */
 typedef enum {
     STATE_WAIT_HEADER1 = 0,
     STATE_WAIT_HEADER2,
@@ -31,7 +31,10 @@ static uint8_t s_rxChecksum = 0;
 static uint8_t s_rxDataIndex = 0;
 static ProtocolPacket_t s_tempPacket;
 
-/* --- 内部私有函数：计算累加校验和 --- */
+/* DMA发送缓冲 */
+static uint8_t DMA_TxBuffer[DMA_RX_BUFFER_SIZE];
+
+/* 校验和 */
 static uint8_t Calc_Checksum(uint8_t id, uint8_t cmd, uint8_t len, const uint8_t *data) {
     uint8_t sum = id + cmd + len;
     for (uint8_t i = 0; i < len; i++) {
@@ -40,7 +43,7 @@ static uint8_t Calc_Checksum(uint8_t id, uint8_t cmd, uint8_t len, const uint8_t
     return sum;
 }
 
-/* --- 内部私有函数：状态机解析单字节 --- */
+/* 状态机解析单字节 */
 static void Parse_Byte(uint8_t byte) {
     switch (s_rxState) {
         case STATE_WAIT_HEADER1:
@@ -68,7 +71,7 @@ static void Parse_Byte(uint8_t byte) {
                 s_rxDataIndex = 0;
                 s_rxState = (byte == 0) ? STATE_WAIT_CHECKSUM : STATE_WAIT_DATA;
             } else {
-                s_rxState = STATE_WAIT_HEADER1; // 数据超长，复位状态机
+                s_rxState = STATE_WAIT_HEADER1;
             }
             break;
 
@@ -80,11 +83,10 @@ static void Parse_Byte(uint8_t byte) {
         case STATE_WAIT_CHECKSUM:
             s_rxChecksum = Calc_Checksum(s_tempPacket.id, s_tempPacket.cmd, s_tempPacket.len, s_tempPacket.data);
             if (byte == s_rxChecksum) {
-                // 校验通过，拷贝到全局结构体，通知主函数
-                memcpy(&RxPacket, &s_tempPacket, sizeof(ProtocolPacket_t));
+                memcpy((void *)&RxPacket, &s_tempPacket, sizeof(ProtocolPacket_t));
                 Flag_NewDataReceived = 1;
             }
-            s_rxState = STATE_WAIT_HEADER1; // 解析完成，准备接下一帧
+            s_rxState = STATE_WAIT_HEADER1;
             break;
 
         default:
@@ -95,13 +97,13 @@ static void Parse_Byte(uint8_t byte) {
 
 /* ================== 外部接口函数 ================== */
 
-/* 1. 初始化 DMA 接收 */
+/* 1. 初始化: 开启中断接收 (逐字节) */
 void Protocol_Init_DMA(UART_HandleTypeDef *huart) {
-    // 开启 串口 DMA 接收 + 空闲中断 (Receive To Idle)
-    HAL_UARTEx_ReceiveToIdle_DMA(huart, DMA_RxBuffer, DMA_RX_BUFFER_SIZE);
+    s_rxState = STATE_WAIT_HEADER1;
+    HAL_UART_Receive_IT(huart, &rx_byte, 1);
 }
 
-/* 2. DMA 组包与发送 */
+/* 2. 发送 (保留DMA发送) */
 void Protocol_Send_DMA(UART_HandleTypeDef *huart, uint8_t cmd, const uint8_t *pData, uint8_t len) {
     if (len > PROTOCOL_MAX_DATA) return;
 
@@ -119,83 +121,57 @@ void Protocol_Send_DMA(UART_HandleTypeDef *huart, uint8_t cmd, const uint8_t *pD
     DMA_TxBuffer[index] = Calc_Checksum(PROTOCOL_MY_ID, cmd, len, pData);
     index++;
 
-    // 调用 DMA 发送 (注意：连续发送需确保上一次发送已完成，可判断 huart->gState)
     HAL_UART_Transmit_DMA(huart, DMA_TxBuffer, index);
 }
 
-/* 3. DMA 空闲中断回调处理（喂给状态机） */
-void Protocol_DMA_RxEvent_Handler(UART_HandleTypeDef *huart, uint16_t Size) {
-    // Size 就是 DMA 刚刚自动搬运了多少个字节
-    // 我们把这些字节挨个喂给状态机
-    for (uint16_t i = 0; i < Size; i++) {
-        Parse_Byte(DMA_RxBuffer[i]);
+/* 3. UART接收完成回调 (每收到1字节触发) */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+    if (huart->Instance == USART1) {
+        Parse_Byte(rx_byte);
+        /* 继续接收下一字节 */
+        HAL_UART_Receive_IT(huart, &rx_byte, 1);
     }
+}
 
-    // 极其重要：一波数据处理完后，必须重新开启 DMA 接收，准备接下一波！
-    HAL_UARTEx_ReceiveToIdle_DMA(huart, DMA_RxBuffer, DMA_RX_BUFFER_SIZE);
+/* 4. UART错误回调 (ORE/FE/NE等) */
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
+    if (huart->Instance == USART1) {
+        /* 清除错误标志, 重启接收 */
+        __HAL_UART_CLEAR_OREFLAG(huart);
+        __HAL_UART_CLEAR_FEFLAG(huart);
+        __HAL_UART_CLEAR_NEFLAG(huart);
+        s_rxState = STATE_WAIT_HEADER1;
+        HAL_UART_Receive_IT(huart, &rx_byte, 1);
+    }
+}
+
+/* 看门狗: 中断接收模式下不需要, 保留空实现兼容头文件 */
+void Protocol_DMA_Watchdog(UART_HandleTypeDef *huart) {
+    (void)huart;
 }
 
 /* ==================== YOLO 数据解析 ==================== */
 /**
  * @brief  解析YOLO识别数据包
  * @note   数据格式: 每目标5字节 [digit, xH, xL, yH, yL], 大端序
- *         调用时机: Flag_NewDataReceived==1 && RxPacket.cmd==BTB_CMD_YOLO_DETECT
  */
 void Yolo_ParseFromPacket(void)
 {
+    ProtocolPacket_t local;
+    __disable_irq();
+    memcpy(&local, (const void *)&RxPacket, sizeof(ProtocolPacket_t));
+    __enable_irq();
+
     yolo_detect.count = 0;
 
-    /* 每目标5字节, 计算有效目标数 */
-    uint8_t num_targets = RxPacket.len / 5;
+    uint8_t num_targets = local.len / 5;
     if (num_targets > YOLO_MAX_TARGETS) num_targets = YOLO_MAX_TARGETS;
 
     for (uint8_t i = 0; i < num_targets; i++) {
         uint8_t offset = i * 5;
-        yolo_detect.targets[i].digit = RxPacket.data[offset];
-        yolo_detect.targets[i].x = (RxPacket.data[offset + 1] << 8) | RxPacket.data[offset + 2];
-        yolo_detect.targets[i].y = (RxPacket.data[offset + 3] << 8) | RxPacket.data[offset + 4];
+        yolo_detect.targets[i].digit = local.data[offset];
+        yolo_detect.targets[i].x = (local.data[offset + 1] << 8) | local.data[offset + 2];
+        yolo_detect.targets[i].y = (local.data[offset + 3] << 8) | local.data[offset + 4];
         yolo_detect.count++;
     }
 }
-/**************************使用案例************************/
-//
-//  #include "uart_protocol_dma.h" // 引入我们刚刚写的库
-//
-// // 假设这些是你单片机里实时读取或计算出的四个电机速度
-// int16_t motor1_speed = 1000;   // 正转 1000
-// int16_t motor2_speed = -500;   // 反转 500
-// int16_t motor3_speed = 0;      // 停止
-// int16_t motor4_speed = 2000;   // 正转 2000
-//
-// /**
-//  * @brief  打包并发送四个电机的速度给上位机
-//  */
-// void Report_Motor_Speeds(void) {
-//     uint8_t payload[8]; // 准备一个 8 字节的数组作为载荷
-//
-//     // ----------------------------------------------------
-//     // 开始“劈数据” (依然采用大端模式：先发高位，再发低位)
-//     // ----------------------------------------------------
-//
-//     // 电机1
-//     payload[0] = (uint8_t)(motor1_speed >> 8);   // 把前8位推到最右边提取出来 (高位)
-//     payload[1] = (uint8_t)(motor1_speed & 0xFF); // 戴上 0xFF 面具，只保留后8位 (低位)
-//
-//     // 电机2 (负数在单片机底层是以补码存储的，位运算完全兼容，不用担心)
-//     payload[2] = (uint8_t)(motor2_speed >> 8);
-//     payload[3] = (uint8_t)(motor2_speed & 0xFF);
-//
-//     // 电机3
-//     payload[4] = (uint8_t)(motor3_speed >> 8);
-//     payload[5] = (uint8_t)(motor3_speed & 0xFF);
-//
-//     // 电机4
-//     payload[6] = (uint8_t)(motor4_speed >> 8);
-//     payload[7] = (uint8_t)(motor4_speed & 0xFF);
-//
-//     // ----------------------------------------------------
-//     // 调用协议库发送
-//     // ----------------------------------------------------
-//     // 假设我们约定 0x30 这个命令码代表 "单片机上报电机速度"
-//     Protocol_Send_DMA(&huart1, 0x30, payload, 8);
-// }

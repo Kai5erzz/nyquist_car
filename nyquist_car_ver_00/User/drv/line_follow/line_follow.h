@@ -19,12 +19,12 @@
 #include <stdint.h>
 
 /* ==================== 巡线PID参数 ==================== */
-#define LINE_KP             50.0f   /**< 比例增益 */
-#define LINE_KD             5.0f    /**< 微分增益 */
-#define LINE_BASE_SPEED     80.0f   /**< 直行基础速度 (rad/s) */
-#define LINE_SEARCH_SPEED   60.0f   /**< 丢线搜索旋转速度 (rad/s) */
-#define LINE_TURN_SPEED     80.0f   /**< 弯道基础速度 (rad/s) */
-#define LINE_TURN_RATIO     0.3f    /**< 弯道内侧速度比例 */
+#define LINE_KP             150.0f   /**< 比例增益 */
+#define LINE_KD             3.0f    /**< 微分增益 */
+#define LINE_BASE_SPEED     50.0f   /**< 直行基础速度 (rad/s) */
+#define LINE_SEARCH_SPEED   70.0f   /**< 丢线搜索旋转速度 (rad/s) */
+#define LINE_TURN_SPEED     100.0f   /**< 弯道基础速度 (rad/s) */
+#define LINE_TURN_RATIO     0.5f    /**< 弯道内侧速度比例 */
 
 /* ==================== 检测掩码 ==================== */
 #define LEFT_TURN_MASK      0x07    /**< 左侧3位 (bit0-2) */

@@ -25,9 +25,9 @@ typedef struct {
     uint8_t data[PROTOCOL_MAX_DATA];  // 数据载荷
 } ProtocolPacket_t;
 
-/* --- 外部引用的全局变量 (供 main.c 使用) --- */
-extern ProtocolPacket_t RxPacket;     // 解析成功的完整数据包
-extern uint8_t Flag_NewDataReceived;  // 新数据接收标志位
+/* --- 外部引用的全局变量 (volatile: ISR写/任务读) --- */
+extern volatile ProtocolPacket_t RxPacket;
+extern volatile uint8_t Flag_NewDataReceived;
 
 /* ==================== 命令码定义 ==================== */
 #define BTB_CMD_YOLO_DETECT   0x01   /* YOLO识别结果 */
@@ -36,7 +36,7 @@ extern uint8_t Flag_NewDataReceived;  // 新数据接收标志位
 #define YOLO_MAX_TARGETS      2      /* 最多识别2个目标 */
 
 /**
- * @brief 单个YOLO目标
+ * @brief 单个YOLO目标 (5字节)
  */
 typedef struct {
     uint8_t  digit;          /**< 识别的数字 (0-9) */
@@ -84,4 +84,10 @@ void Protocol_Init_DMA(UART_HandleTypeDef *huart);
  * @param  Size       DMA本次接收到的字节数
  */
 void Protocol_DMA_RxEvent_Handler(UART_HandleTypeDef *huart, uint16_t Size);
+
+/**
+ * @brief  DMA接收看门狗 (定期调用, 检测卡住则重启)
+ * @param  huart      串口句柄
+ */
+void Protocol_DMA_Watchdog(UART_HandleTypeDef *huart);
 #endif //CAR_CHASSIS_UART_PROTOCOL_DMA_H

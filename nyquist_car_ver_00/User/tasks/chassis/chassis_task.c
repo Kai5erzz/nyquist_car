@@ -1,13 +1,21 @@
 /**
  * @file    chassis_task.c
  * @author  kaiser
- * @version V1.0.0
- * @date    2026-05-03
+ * @version V1.0.1
+ * @date    2026-05-05
  * @brief   底盘控制任务 (巡线 + 直角弯角度环)
  *
  * 流程:
- *   校准 → 巡线 → 检测到弯道 → 角度环转80° → 回到巡线
- *   巡线 → 检测到十字 → 停车
+ * 校准 → 巡线 → 检测到弯道 → 角度环转80° → 回到巡线
+ * 巡线 → 检测到十字 → 停车
+ *
+ * V1.0.1 修复:
+ *  [FIX-1] 数字0/1的左右映射对调（A/B 转反）
+ *  [FIX-2] CROSS_SKIP 也走 STATE_CROSS_FORWARD，避免十字横杠
+ *          被误识别为弯道，导致 C/D 在第一个十字后直接飞车
+ *  [FIX-3] SKIP 返回巡线时重置 LineFollow PID 并刷新 last_turn_tick
+ *          抑制十字残留信号触发假弯道
+ *  [FIX-4] CROSS_FORWARD_MS 350 → 250，避免十字过远再转弯导致脱线
  */
 
 #include "chassis_task.h"
@@ -21,7 +29,6 @@
 #include "drv/angle_ctrl/angle_ctrl.h"
 #include "drv/bmi088/bmi088.h"
 #include "drv/btb_cmd/uart_protocol_dma.h"
-#include "drv/vofa/vofa_plus.h"
 #include "usart.h"
 #include "main.h"
 #include <math.h>
@@ -30,10 +37,13 @@
 #define LINE_DURATION_MS  10000   /* 巡线总时长 (ms) */
 
 /* ==================== 角度闭环参数 ==================== */
-#define ANGLE_TARGET_DEG  80.0f   /* 直角弯目标角度 */
+#define ANGLE_TARGET_DEG  80.0f   /* 改为80度：预留10度裕量，让巡线PID主动吸入线中，防止过冲脱线 */
 #define ANGLE_ERR_THRESH  3.0f    /* 角度误差阈值 (deg) */
 #define ANGLE_TIMEOUT_MS  2000    /* 角度环超时 (ms) */
 #define TURN_COOLDOWN_MS  1500    /* 弯道检测冷却 (ms) */
+#define TURN_FORWARD_MS   150     /* 弯道前直行时间 (ms) */
+#define CROSS_COOLDOWN_MS 1000    /* 十字路口冷却 (ms) */
+#define CROSS_FORWARD_MS  150     /* [FIX-4] 十字前进越线时间：100太短不过线，350太长会脱线，250 折中 */
 
 /* ==================== 校准参数 ==================== */
 #define CAL_SAMPLE_COUNT  100
@@ -51,6 +61,7 @@ typedef enum {
     STATE_CAL_BEEP2,
     STATE_CAL_DONE,
     STATE_LINE_FOLLOWING,
+    STATE_CROSS_FORWARD,
     STATE_ANGLE_TURNING,
     STATE_LINE_STOP,
 } ChassisState_e;
@@ -78,13 +89,17 @@ struct {
     uint8_t yolo_digit1;
     float yolo_x1;
     float yolo_y1;
+    /* 十字路口调试 */
+    int8_t dbg_target_digit;
+    uint8_t dbg_crossroad_count;
+    uint8_t dbg_cross_action;
+    uint8_t dbg_line_started;
 } chassis_dbg;
 
 /* ==================== Task Handle ==================== */
 osThreadId_t chassisTaskHandle;
 
 /* ==================== 模块实例 ==================== */
-static Vofa_Instance_t chassis_vofa;
 static AngleCtrl_t angle_ctrl;
 
 /* ==================== Topic ==================== */
@@ -97,6 +112,22 @@ static const float motor_dir_sign[MOTOR_NUM] = {
 
 static int8_t turn_sign = 0;
 static uint32_t last_turn_tick = 0;
+static uint32_t last_cross_tick = 0;  /* 上次十字处理时间戳, 冷却用 */
+static uint8_t forward_for_turn = 0;  /* 1=弯道前前进, 0=十字前前进 */
+
+/* ==================== 十字路口决策 ==================== */
+typedef enum {
+    CROSS_TURN_NONE = 0,   /* 无待执行转弯 */
+    CROSS_TURN_LEFT,       /* 待左转 */
+    CROSS_TURN_RIGHT,      /* 待右转 */
+    CROSS_SKIP,            /* 跳过当前十字 */
+    CROSS_STOP,            /* 停车 */
+} CrossAction_e;
+
+static int8_t target_digit = -1;         /* YOLO目标数字 (-1=未收到) */
+static uint8_t crossroad_count = 0;      /* 已遇到的十字路口数 */
+static CrossAction_e cross_action = CROSS_TURN_NONE; /* 当前十字应执行的动作 */
+static uint8_t line_started = 0;         /* 巡线已启动标志 */
 
 /* ==================== LED & 蜂鸣器 ==================== */
 static void LED_SetAll(uint8_t s0, uint8_t s1, uint8_t s2, uint8_t s3)
@@ -131,29 +162,6 @@ static void SetMotorSpeed(float left, float right)
     Motor_SetSpeed(3, left  * motor_dir_sign[3]);
 }
 
-/* ==================== VOFA+ ==================== */
-static void Chassis_VofaSend(void)
-{
-    Vofa_SetData(&chassis_vofa, 0,  chassis_dbg.line_error);
-    Vofa_SetData(&chassis_vofa, 1,  chassis_dbg.left_speed);
-    Vofa_SetData(&chassis_vofa, 2,  chassis_dbg.right_speed);
-    Vofa_SetData(&chassis_vofa, 3,  (float)chassis_dbg.line_result);
-    Vofa_SetData(&chassis_vofa, 4,  chassis_dbg.target_angle);
-    Vofa_SetData(&chassis_vofa, 5,  chassis_dbg.current_angle);
-    Vofa_SetData(&chassis_vofa, 6,  chassis_dbg.angle_error);
-    Vofa_SetData(&chassis_vofa, 7,  chassis_dbg.pid_output);
-    Vofa_SetData(&chassis_vofa, 8,  chassis_dbg.yaw_total);
-    Vofa_SetData(&chassis_vofa, 9,  (float)chassis_dbg.state);
-    Vofa_SetData(&chassis_vofa, 10, (float)chassis_dbg.yolo_count);
-    Vofa_SetData(&chassis_vofa, 11, (float)chassis_dbg.yolo_digit0);
-    Vofa_SetData(&chassis_vofa, 12, chassis_dbg.yolo_x0);
-    Vofa_SetData(&chassis_vofa, 13, chassis_dbg.yolo_y0);
-    Vofa_SetData(&chassis_vofa, 14, (float)chassis_dbg.yolo_digit1);
-    Vofa_SetData(&chassis_vofa, 15, chassis_dbg.yolo_x1);
-    Vofa_SetData(&chassis_vofa, 16, chassis_dbg.yolo_y1);
-    Vofa_Transmit(&chassis_vofa, &huart2);
-}
-
 /* ==================== 任务入口 ==================== */
 __attribute__((noreturn))
 void chassis_task_entry(void *argument)
@@ -182,6 +190,10 @@ void chassis_task_entry(void *argument)
             chassis_dbg.yolo_digit1 = (yolo_detect.count > 1) ? yolo_detect.targets[1].digit : 0;
             chassis_dbg.yolo_x1     = (yolo_detect.count > 1) ? (float)yolo_detect.targets[1].x : 0;
             chassis_dbg.yolo_y1     = (yolo_detect.count > 1) ? (float)yolo_detect.targets[1].y : 0;
+            /* 只在巡线启动前更新digit, KEY2后锁死 */
+            if (!line_started && yolo_detect.count > 0) {
+                target_digit = yolo_detect.targets[0].digit;
+            }
         }
 
         switch (state) {
@@ -263,6 +275,10 @@ void chassis_task_entry(void *argument)
             break;
 
         case STATE_CAL_DONE:
+            LED_SetAll(
+                (target_digit >= 0) ? ((target_digit >> 0) & 1) : 0,
+                (target_digit >= 0) ? ((target_digit >> 1) & 1) : 0,
+                0, 0);
             if (HAL_GPIO_ReadPin(KEY2_GPIO_Port, KEY2_Pin) == GPIO_PIN_SET) {
                 osDelay(50);
                 if (HAL_GPIO_ReadPin(KEY2_GPIO_Port, KEY2_Pin) == GPIO_PIN_SET) {
@@ -270,6 +286,11 @@ void chassis_task_entry(void *argument)
                     LineFollow_Init();
                     AngleCtrl_Init(&angle_ctrl);
                     imu_data.yaw_total = 0;
+                    crossroad_count = 0;
+                    cross_action = CROSS_TURN_NONE;
+                    line_started = 1;
+                    last_cross_tick = now;
+                    last_turn_tick  = now;   /* 同步刷新弯道冷却基准 */
                     state_tick = now;
                     state = STATE_LINE_FOLLOWING;
                 }
@@ -305,26 +326,100 @@ void chassis_task_entry(void *argument)
                 }
             }
 
-            /* 弯道检测 (带冷却) */
-            if (result == LINE_LEFT_TURN && (now - last_turn_tick >= TURN_COOLDOWN_MS)) {
+            /* 十字路口决策 (带冷却) */
+            if (result == LINE_CROSS && (now - last_cross_tick >= CROSS_COOLDOWN_MS)) {
+                crossroad_count++;
+                chassis_dbg.dbg_target_digit = target_digit;
+                chassis_dbg.dbg_crossroad_count = crossroad_count;
+                chassis_dbg.dbg_line_started = line_started;
+
+                if (target_digit < 0) {
+                    cross_action = CROSS_SKIP;
+                } else {
+                    switch (target_digit) {
+                        /* [FIX-1] 0/1 的左右映射对调：A/B 转反问题 */
+                        case 0: cross_action = (crossroad_count == 1) ? CROSS_TURN_LEFT  : CROSS_STOP; break;
+                        case 1: cross_action = (crossroad_count == 1) ? CROSS_TURN_RIGHT : CROSS_STOP; break;
+                        case 2: cross_action = (crossroad_count == 1) ? CROSS_SKIP :
+                                               (crossroad_count == 2) ? CROSS_TURN_LEFT : CROSS_STOP; break;
+                        case 3: cross_action = (crossroad_count == 1) ? CROSS_SKIP :
+                                               (crossroad_count == 2) ? CROSS_TURN_RIGHT : CROSS_STOP; break;
+                        default: cross_action = CROSS_STOP; break;
+                    }
+                }
+
+                last_cross_tick = now;
+                chassis_dbg.dbg_cross_action = (uint8_t)cross_action;
+
+                /* [FIX-2] 加入 CROSS_SKIP：SKIP 也要走一段直行越过十字横杠，
+                 * 否则横杠会被巡线误识别为弯道，导致 C/D 在第一个十字后立刻飞车 */
+                if (cross_action == CROSS_TURN_LEFT ||
+                    cross_action == CROSS_TURN_RIGHT ||
+                    cross_action == CROSS_STOP ||
+                    cross_action == CROSS_SKIP) {
+                    forward_for_turn = 0;
+                    state_tick = now;
+                    state = STATE_CROSS_FORWARD;
+                }
+            }
+            /* 弯道检测 (带冷却) → 先直行越过盲区再转弯 */
+            else if (result == LINE_LEFT_TURN && (now - last_turn_tick >= TURN_COOLDOWN_MS)) {
                 turn_sign = +1;
-                AngleCtrl_SetTarget(&angle_ctrl, imu_data.yaw_total + ANGLE_TARGET_DEG);
-                angle_start_tick = now;
-                chassis_dbg.target_angle = angle_ctrl.target;
-                state = STATE_ANGLE_TURNING;
+                forward_for_turn = 1;
+                state_tick = now;
+                state = STATE_CROSS_FORWARD;
             }
             else if (result == LINE_RIGHT_TURN && (now - last_turn_tick >= TURN_COOLDOWN_MS)) {
                 turn_sign = -1;
-                AngleCtrl_SetTarget(&angle_ctrl, imu_data.yaw_total - ANGLE_TARGET_DEG);
-                angle_start_tick = now;
-                chassis_dbg.target_angle = angle_ctrl.target;
-                state = STATE_ANGLE_TURNING;
-            }
-            else if (result == LINE_CROSS) {
-                state = STATE_LINE_STOP;
+                forward_for_turn = 1;
+                state_tick = now;
+                state = STATE_CROSS_FORWARD;
             }
             else if (now - state_tick >= LINE_DURATION_MS) {
                 state = STATE_LINE_STOP;
+            }
+            break;
+        }
+
+        /* ==================== 前进状态 (弯道/十字越线) ==================== */
+        case STATE_CROSS_FORWARD: {
+            uint32_t fwd_ms = forward_for_turn ? TURN_FORWARD_MS : CROSS_FORWARD_MS;
+            float base = LINE_BASE_SPEED; // 保持直行越线
+            SetMotorSpeed(base, base);
+
+            if (now - state_tick >= fwd_ms) {
+                if (forward_for_turn) {
+                    /* 弯道直行越线结束，转弯 */
+                    AngleCtrl_SetTarget(&angle_ctrl, imu_data.yaw_total - (float)turn_sign * ANGLE_TARGET_DEG);
+                    angle_start_tick = now;
+                    chassis_dbg.target_angle = angle_ctrl.target;
+                    forward_for_turn = 0;
+                    state = STATE_ANGLE_TURNING;
+                } else if (cross_action == CROSS_TURN_LEFT) {
+                    /* 十字左转 */
+                    turn_sign = +1;
+                    AngleCtrl_SetTarget(&angle_ctrl, imu_data.yaw_total - (float)turn_sign * ANGLE_TARGET_DEG);
+                    angle_start_tick = now;
+                    chassis_dbg.target_angle = angle_ctrl.target;
+                    state = STATE_ANGLE_TURNING;
+                } else if (cross_action == CROSS_TURN_RIGHT) {
+                    /* 十字右转 */
+                    turn_sign = -1;
+                    AngleCtrl_SetTarget(&angle_ctrl, imu_data.yaw_total - (float)turn_sign * ANGLE_TARGET_DEG);
+                    angle_start_tick = now;
+                    chassis_dbg.target_angle = angle_ctrl.target;
+                    state = STATE_ANGLE_TURNING;
+                } else if (cross_action == CROSS_STOP) {
+                    /* 十字停车 */
+                    state = STATE_LINE_STOP;
+                } else {
+                    /* [FIX-3] CROSS_SKIP：已驶过十字盲区，
+                     *  - 重置巡线 PID 清掉直行段的积分
+                     *  - 刷新 last_turn_tick 抑制十字残留导致的假弯道触发 */
+                    LineFollow_Init();
+                    last_turn_tick = now;
+                    state = STATE_LINE_FOLLOWING;
+                }
             }
             break;
         }
@@ -349,7 +444,7 @@ void chassis_task_entry(void *argument)
             if (AngleCtrl_IsDone(&angle_ctrl, ANGLE_ERR_THRESH) ||
                 (now - angle_start_tick >= ANGLE_TIMEOUT_MS)) {
                 last_turn_tick = now;
-                LineFollow_Init();
+                LineFollow_Init(); // 清空巡线的积分与前馈
                 state = STATE_LINE_FOLLOWING;
             }
             break;
@@ -373,8 +468,6 @@ void chassis_task_entry(void *argument)
         chassis_fdb_data.wheel_speed_r = chassis_dbg.right_speed;
         mcn_publish(MCN_HUB(chassis_fdb), &chassis_fdb_data);
 
-        Chassis_VofaSend();
-
         tick_ms += CHASSIS_TASK_PERIOD;
         osDelay(CHASSIS_TASK_PERIOD);
     }
@@ -383,7 +476,6 @@ void chassis_task_entry(void *argument)
 /* ==================== 任务初始化 ==================== */
 void chassis_task_init(void)
 {
-    Vofa_Init(&chassis_vofa, 17);
     Grayscale_Init();
     LineFollow_Init();
     AngleCtrl_Init(&angle_ctrl);

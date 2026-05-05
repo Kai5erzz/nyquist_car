@@ -26,8 +26,8 @@
 #define CTRL_FREQ      500.0f   /**< 控制频率 (Hz) */
 
 /* 速度环PID参数 */
-#define SPEED_KP       120.0f
-#define SPEED_KI       10.0f
+#define SPEED_KP       80.0f
+#define SPEED_KI       5.0f
 #define SPEED_KD       0.01f
 #define SPEED_OUT_MAX  10000.0f
 

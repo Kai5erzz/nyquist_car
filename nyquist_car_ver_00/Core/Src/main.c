@@ -220,15 +220,7 @@ void SystemClock_Config(void)
 
 /* USER CODE BEGIN 4 */
 
-/**
- * @brief  DMA空闲中断回调 → 喂给协议状态机
- */
-void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
-{
-    if (huart->Instance == USART1) {
-        Protocol_DMA_RxEvent_Handler(huart, Size);
-    }
-}
+/* USER CODE END 4 */
 
 /* USER CODE END 4 */
 
