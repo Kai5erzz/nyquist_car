@@ -74,6 +74,7 @@ uint8_t AngleCtrl_IsDone(AngleCtrl_t *ctrl, float thresh);
  * @param  left   左轮速度输出指针
  * @param  right  右轮速度输出指针
  */
-void AngleCtrl_ToWheelSpeed(float turn, float *left, float *right);
+// 将原本的 void AngleCtrl_ToWheelSpeed(float turn, float *left, float *right); 改为：
+void AngleCtrl_ToWheelSpeed(AngleCtrl_t *ctrl, float *left, float *right);
 
 #endif /* ANGLE_CTRL_H */

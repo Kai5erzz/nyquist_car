@@ -22,13 +22,7 @@ void AngleCtrl_Init(AngleCtrl_t *ctrl)
     ctrl->output = 0;
 }
 
-void AngleCtrl_SetTarget(AngleCtrl_t *ctrl, float target)
-{
-    ctrl->target = target;
-    ctrl->prev_error = 0;
-    /* 注意：切换目标时不要将 ctrl->output 清零，
-       保留当前的速度可以利用斜坡函数实现平滑过渡（例如从巡线切过来时的初速度减速） */
-}
+
 
 float AngleCtrl_Update(AngleCtrl_t *ctrl, float current)
 {
@@ -67,22 +61,38 @@ uint8_t AngleCtrl_IsDone(AngleCtrl_t *ctrl, float thresh)
     return fabsf(ctrl->error) < thresh;
 }
 
-void AngleCtrl_ToWheelSpeed(float turn, float *left, float *right)
+void AngleCtrl_SetTarget(AngleCtrl_t *ctrl, float target)
+{
+    ctrl->target = target;
+    ctrl->prev_error = 0;
+
+    /* [修复] 必须清零！ctrl->output 是差速转向值。
+       如果不清零，连续的同向弯道会瞬间满载输出，导致严重的单侧打滑和前冲 */
+    ctrl->output = 0;
+}
+
+void AngleCtrl_ToWheelSpeed(AngleCtrl_t *ctrl, float *left, float *right)
 {
     float back_comp = 0.0f;
 
-    /* 判断是否为右转:
-     * 右转需要左轮前进(正)、右轮后退(负)，因此此时 turn 必然是【负数】。
+    /* 动态误差刹车：仅针对 A、C 弯道 (目标误差 error < 0 时触发)
+     * 刚入弯时误差最大(-80)，产生最大倒车力主动刹停直行惯性；
+     * 随着转弯完成，误差趋零，刹车力平滑消失。
      */
-    // if (turn < 0.0f) {
-    //     /* turn 是负数，乘以正数 comp_factor 后依然是负数，代表向后的拉力 */
-    //     // float comp_factor = 0.3f;  /* 比例补偿系数：根据速度动态调节倒车力 (推荐 0.1 ~ 0.3) */
-    //     back_comp   = -50.0f; /* 固定死区补偿：只要一检测到右转，立刻给一个基础倒车力，防止起步前冲 */
-    //     //
-    //     // back_comp = (turn * comp_factor) + base_comp;
-    // }
+    if (ctrl->error < 0.0f) {
+        float brake_factor = 0.5f; /* 刹车系数，可根据底盘重量微调 (建议 1.5 ~ 2.5) */
 
-    *left  = back_comp - turn;
-    *right = back_comp + turn;
+        // error 为负数，乘出来就是强力的倒车补偿
+        back_comp = ctrl->error * brake_factor;
+
+        /* 限制最大刹车力，防止电机瞬间反接电流过载 */
+        if (back_comp < -150.0f) {
+            back_comp = -150.0f;
+        }
+    }
+
+    /* ctrl->output 已经是经过斜坡处理的 turn 值 */
+    *left  = back_comp - ctrl->output;
+    *right = back_comp + ctrl->output;
 }
 

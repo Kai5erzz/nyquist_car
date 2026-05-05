@@ -424,16 +424,17 @@ void chassis_task_entry(void *argument)
             break;
         }
 
-        /* ==================== 角度环转弯 ==================== */
+            /* ==================== 角度环转弯 ==================== */
         case STATE_ANGLE_TURNING: {
-            float turn = AngleCtrl_Update(&angle_ctrl, imu_data.yaw_total);
-            chassis_dbg.current_angle = imu_data.yaw_total;
-            chassis_dbg.angle_error = angle_ctrl.error;
-            chassis_dbg.pid_output = turn;
+                float turn = AngleCtrl_Update(&angle_ctrl, imu_data.yaw_total);
+                chassis_dbg.current_angle = imu_data.yaw_total;
+                chassis_dbg.angle_error = angle_ctrl.error;
+                chassis_dbg.pid_output = turn;
 
-            float left, right;
-            AngleCtrl_ToWheelSpeed(turn, &left, &right);
-            SetMotorSpeed(left, right);
+                float left, right;
+                // [修改这里] 传入 &angle_ctrl 而不是 turn
+                AngleCtrl_ToWheelSpeed(&angle_ctrl, &left, &right);
+                SetMotorSpeed(left, right);
 
             LED_SetAll(
                 (turn_sign > 0) ? 1 : 0,
